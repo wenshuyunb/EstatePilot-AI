@@ -12,8 +12,26 @@ out/
 .turbo/
 *.tsbuildinfo
 
-# ---- Prisma (Prisma 7 emits the client as TypeScript source) ----
-packages/database/generated/
+# ---- Prisma ----
+#
+# ⚠️ 这里的规则**故意不忽略** Prisma 生成的客户端，原因如下：
+#
+#   · Prisma 7 把客户端生成为 **TypeScript 源码**（不是编译后的 .js），
+#     共 49 个文件、约 5.5 MB，位于 `packages/database/src/generated/prisma/`
+#   · 它是**类型定义的来源** —— 下游所有包（api/web）的类型检查都依赖它
+#   · 提交它可以保证：`pnpm install && pnpm build` 直接可用，
+#     不必先手动跑 `prisma generate`
+#
+# 代价：schema 变更时会产生较大的 diff。由于构建脚本已包含
+#      `prisma generate`（见 packages/database/package.json 的 build），
+#      未来若想改回"生成而非提交"，只需取消下面一行的注释。
+#
+# 注：原先写的 `packages/database/generated/` 是**错误路径**
+#     （schema 里 output = "../src/generated/prisma"），
+#     该规则从未生效。这里保留说明以免后人再次写错。
+# packages/database/src/generated/
+
+# 本地 SQLite（若使用）不提交
 packages/database/prisma/migrations/dev.db*
 
 # ---- Environment ----
