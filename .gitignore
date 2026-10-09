@@ -1,0 +1,80 @@
+# ---- Dependencies ----
+node_modules/
+.pnpm-store/
+.pnpm-state/
+.pnpm-devtools/
+
+# ---- Build output ----
+dist/
+build/
+out/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# ---- Prisma (Prisma 7 emits the client as TypeScript source) ----
+packages/database/generated/
+packages/database/prisma/migrations/dev.db*
+
+# ---- Environment ----
+#
+# 用 `.env*` 覆盖**所有**变体（含 .env.backup-*、.env.production 等），
+# 再用 `!.env.example` 把模板放回来 —— 这是唯一该提交的 env 文件。
+#
+# 为什么不用逐条列举（真实踩坑）：
+#   原来只写了 .env / .env.local / .env.*.local，
+#   结果 `.env.backup-20261009-213841`（含真实 API Key 与数据库密码的备份）
+#   **没被任何规则命中**，差点被推上公开仓库。
+#   逐条列举永远会漏，用通配 + 白名单才可靠。
+.env*
+!.env.example
+
+# ---- Test / coverage ----
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+
+# ---- Logs ----
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ---- 诊断探针日志（本地运行产生，含调用时间戳，不提交）----
+# 这些是排查贝壳限流时生成的运行记录，属于本地产物
+.probe-log.txt
+.quota-log.txt
+.session-log.txt
+.threshold-log.txt
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# ---- Local scratch (never commit) ----
+.tmp-*/
+_tmp/
+
+# ---- 数据库备份（绝不提交）----
+#
+# 为什么单独列出：`.backups/` 下是 pg_dump 的完整库备份，
+# 里面含**真实客户数据**（手机号、邮箱、聊天记录）。
+#
+# 这是真实踩坑：首次提交时 `estatepilot-before-clean-*.sql`（14 MB、
+# 含 337 个手机号）被一并提交了 —— 因为它不在任何忽略规则里。
+# 公开仓库里出现客户手机号不仅是隐私事故，还可能违反个人信息保护法。
+.backups/
+backups/
+*.sql.gz
+*.dump
+
+# ---- Beike CLI binary (7MB, downloaded via install-cli.ps1) ----
+# 不提交二进制：体积大、平台相关、可由脚本按校验值重新下载
+infrastructure/beike/bin/
+infrastructure/beike/*.tar.gz

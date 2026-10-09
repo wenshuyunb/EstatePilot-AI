@@ -1,0 +1,29 @@
+{
+  "name": "@estatepilot/utils",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EstatePilot AI - 通用工具（同构，可在 Node 与浏览器运行）",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"@estatepilot/utils: no lint target\"",
+    "test": "echo \"@estatepilot/utils: no test target\""
+  },
+  "dependencies": {
+    "@estatepilot/types": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // rootDir 必须是 src，这样产物落在 dist/index.js，
+    // 与 package.json 的 main/exports 一致。
+    // 注意：prisma.config.ts 不能加进 include —— 它会强制把 rootDir 抬到包根，
+    // 导致产物变成 dist/src/index.js。Prisma CLI 自己用 tsx 加载它，无需 tsc 编译。
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "types": ["node"]
+  },
+  // prisma/seed.ts 由 tsx 直接运行（见 package.json 的 seed 脚本），
+  // 不纳入 tsc 编译，避免它落在 rootDir 之外导致产物路径错乱。
+  "include": ["src/**/*.ts"],
+  // generated/ 是 Prisma 生成的代码，自身已带 @ts-nocheck。
+  // 不排除它会导致 tsc 对生成代码做类型检查，既慢又会引入上游的类型噪音。
+  "exclude": ["node_modules", "dist", "src/generated"]
+}

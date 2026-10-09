@@ -1,0 +1,2418 @@
+// ============================================================================
+// EstatePilot AI - Prisma Schema
+// ============================================================================
+//
+// 数据源与生成器配置。
+//
+// ⚠️ Prisma 7 关键差异（见 DEVELOPMENT_ENVIRONMENT.md 15.7）：
+//   - generator provider 是 "prisma-client"（不是 prisma-client-js），生成 TypeScript 源码
+//   - 客户端必须搭配驱动适配器使用：new PrismaClient({ adapter: new PrismaPg({ connectionString }) })
+//   - 向量列用 Unsupported("vector(N)") 声明，由迁移管理，应用层用 $queryRaw 查询
+//
+// 多租户隔离约定（全库强制）：
+//   1. 所有租户数据表都必须有 organizationId 字段并建立索引。
+//   2. 所有查询必须带 organizationId 作用域，禁止跨租户读取。
+//   3. 复合唯一约束一律以 organizationId 打头。
+// ============================================================================
+
+generator client {
+  provider = "prisma-client"
+  // 输出到 src/ 内部的原因：
+  // Prisma 7 生成的是 TypeScript 源码，必须参与本包的 tsc 编译。
+  // 若放在包根（rootDir 之外），tsc 会报 TS6059 并拒绝生成声明文件。
+  output   = "../src/generated/prisma"
+  runtime  = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+  // ⚠️ Prisma 7：url 不再支持写在这里。
+  // 连接串统一在 prisma.config.ts 的 datasource.url 中提供，
+  // 运行时则由 PrismaPg 驱动适配器提供。
+}
+
+// ============================================================================
+// 枚举
+// ============================================================================
+
+/// 系统角色。权限等级由 USER_ROLE_RANK 定义（见 @estatepilot/types）
+enum UserRole {
+  SUPER_ADMIN
+  OWNER
+  STORE_MANAGER
+  AGENT
+  VIEWER
+}
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum PlanTier {
+  FREE
+  PRO
+  STORE
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  EXPORT
+  IMPORT
+  VIEW_SENSITIVE
+  PERMISSION_CHANGE
+  CONFIG_CHANGE
+  REVOKE_CONSENT
+  DELETE_PERSONAL_DATA
+}
+
+// ============================================================================
+// 组织 / 门店 / 团队
+// ============================================================================
+
+/// 租户（一家中介公司）。所有业务数据的隔离边界。
+model Organization {
+  id   String @id @default(cuid())
+  /// 公司全称
+  name String
+  /// 简称，界面展示用
+  shortName String?
+  /// 统一社会信用代码
+  unifiedSocialCreditCode String?
+  /// 品牌名，如「德佑」「链家体系」
+  brandName String?
+  city      String?
+  contactName  String?
+  contactPhone String?
+  /// 公司 Logo
+  logoUrl String?
+  /// 是否已停用（超管操作）
+  isActive Boolean @default(true)
+  /// 租户级配置，JSONB 便于扩展
+  settings Json @default("{}")
+
+  /// 关系
+  stores        Store[]
+  users         User[]
+  teams         Team[]
+  subscription  Subscription?
+  customers     Customer[]
+  properties    Property[]
+  viewings      Viewing[]
+  opportunities Opportunity[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+  aiConversations AiConversation[]
+  aiRuns        AiRun[]
+  tasks         Task[]
+  scoringRules  BehaviorScoringRule[]
+  providerConfigs PropertyProviderConfig[]
+
+  // Phase 11 新增
+  messageImports             CustomerMessageImport[]
+  requirementProfiles        CustomerRequirementProfile[]
+  requirementSnapshots       CustomerRequirementSnapshot[]
+  customerPropertyFeedbacks  CustomerPropertyFeedback[]
+  recommendationBatches      RecommendationBatch[]
+  generatedReplies           GeneratedCustomerReply[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+  @@map("organizations")
+}
+
+/// 门店
+model Store {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name String
+  /// 门店编码，公司内部编号
+  code String?
+  city     String
+  district String?
+  address  String?
+  /// 门店坐标，用于计算门店到房源的距离
+  longitude Decimal? @db.Decimal(10, 7)
+  latitude  Decimal? @db.Decimal(10, 7)
+  phone     String?
+  /// 门店负责人（店长）
+  managerId String?
+
+  isActive Boolean @default(true)
+
+  users         User[]
+  teams         Team[]
+  customers     Customer[]
+  viewings      Viewing[]
+  opportunities Opportunity[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@index([organizationId, city, district])
+  @@map("stores")
+}
+
+/// 团队（门店下的小组，如「张店长一组」）
+model Team {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String
+  store          Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  /// 团队负责人
+  leaderId String?
+  isActive Boolean @default(true)
+
+  members User[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([storeId, name])
+  @@index([organizationId])
+  @@index([storeId])
+  @@map("teams")
+}
+
+// ============================================================================
+// 用户
+// ============================================================================
+
+/// 用户（经纪人 / 店长 / 负责人 / 只读成员 / 平台超管）
+model User {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store          Store?  @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  teamId         String?
+  team           Team?   @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  /// 登录邮箱（同组织内唯一）
+  email String
+  /// 登录手机号（同组织内唯一，可空）
+  phone String?
+  /// scrypt 哈希后的密码，格式 scrypt$N$r$p$salt$hash
+  passwordHash String
+  name         String
+  avatarUrl    String?
+  role         UserRole   @default(AGENT)
+  status       UserStatus @default(ACTIVE)
+
+  /// 入职/工号
+  employeeNo String?
+  /// 擅长区域，用于房源分配
+  specialties String[] @default([])
+  /// 本月目标成交套数
+  monthlyDealTarget Int?
+
+  /// 最后登录信息（审计与安全用）
+  lastLoginAt DateTime?
+  lastLoginIp String?
+  /// 连续登录失败次数，用于锁定
+  failedLoginAttempts Int @default(0)
+  lockedUntil         DateTime?
+  /// 密码最后修改时间
+  passwordChangedAt DateTime?
+
+  /// 通知偏好
+  notifyByEmail Boolean @default(false)
+  notifyBySms   Boolean @default(false)
+
+  /// 关系
+  customers        Customer[]        @relation("CustomerAssignedAgent")
+  createdCustomers Customer[]        @relation("CustomerCreatedBy")
+  communications   Communication[]
+  viewings         Viewing[]
+  opportunities    Opportunity[]     @relation("OpportunityAssignedAgent")
+  handledOpportunities Opportunity[] @relation("OpportunityHandledBy")
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+  aiConversations  AiConversation[]
+  aiRuns           AiRun[]
+  tasks            Task[]            @relation("TaskAssignedAgent")
+  createdTasks     Task[]            @relation("TaskCreatedBy")
+  refreshTokens    RefreshToken[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, email])
+  @@unique([organizationId, phone])
+  @@index([organizationId, role])
+  @@index([organizationId, status])
+  @@index([storeId])
+  @@index([teamId])
+  @@map("users")
+}
+
+/// Refresh Token 记录，支持轮换与重放检测
+model RefreshToken {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 只存 token 的 SHA-256 哈希，不存明文
+  tokenHash String @unique
+  /// 同一登录会话的家族 ID；检测到重放时整族失效
+  familyId  String
+  /// 轮换代数，每刷新一次 +1
+  generation Int @default(0)
+  /// 是否已被使用（轮换后原 token 标记为已用）
+  usedAt DateTime?
+  /// 被撤销时间（重放检测或主动登出）
+  revokedAt DateTime?
+  revokedReason String?
+
+  userAgent String?
+  ipHash    String?
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ============================================================================
+// 订阅（商业化预留）
+// ============================================================================
+
+model Subscription {
+  id             String @id @default(cuid())
+  organizationId String @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  plan   PlanTier           @default(FREE)
+  status SubscriptionStatus @default(TRIALING)
+
+  startDate DateTime @default(now())
+  endDate   DateTime?
+  /// 试用结束时间
+  trialEndsAt DateTime?
+
+  /// 配额（可由后台单独覆盖套餐默认值）
+  seatLimit     Int @default(3)
+  customerLimit Int @default(200)
+  aiUsageLimit  Int @default(200)
+  storeLimit    Int @default(1)
+
+  /// 当前计费周期内的 AI 用量
+  aiUsageThisPeriod Int      @default(0)
+  periodStart       DateTime @default(now())
+  periodEnd         DateTime?
+
+  /// 价格（分/月），便于对账
+  priceCentsPerMonth Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([plan])
+  @@map("subscriptions")
+}
+
+// ============================================================================
+// 审计日志
+// ============================================================================
+
+/// 审计日志：记录谁在什么时候改了什么，改动前后是什么
+model AuditLog {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String?
+  user           User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action AuditAction
+  /// 实体类型，如 "Customer"
+  entity   String
+  entityId String?
+
+  /// 变更前快照（已脱敏）
+  before Json?
+  /// 变更后快照（已脱敏）
+  after  Json?
+  /// 本次变更涉及的字段名
+  changedFields String[] @default([])
+
+  ip        String?
+  userAgent String?
+  /// 请求追踪 ID
+  traceId   String?
+  /// 附加说明
+  message   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, entity, entityId])
+  @@index([organizationId, action])
+  @@index([userId, createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// 系统级：特性开关 / 后台配置
+// ============================================================================
+
+/// 特性开关（超管后台可控制）
+model FeatureFlag {
+  id    String @id @default(cuid())
+  key   String @unique
+  name  String
+  description String?
+  enabled Boolean @default(false)
+  /// 灰度比例 0～100
+  rolloutPercent Int @default(100)
+  /// 限定组织，空表示全局
+  organizationIds String[] @default([])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+/// 系统级 KV 配置（AI Prompt 覆盖、匹配权重等）
+model SystemSetting {
+  id    String @id @default(cuid())
+  /// 配置键，如 "match.weights" / "prompt.SALES_FOLLOWUP"
+  key   String @unique
+  /// 配置值
+  value Json
+  description String?
+  /// 修改人
+  updatedByUserId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+// ============================================================================
+// 客户域枚举
+// ============================================================================
+
+enum CustomerStatus {
+  NEW
+  FOLLOWING
+  HIGH_INTENT
+  VIEWING
+  NEGOTIATING
+  DEAL
+  LOST
+  DORMANT
+}
+
+enum IntentLevel {
+  A
+  B
+  C
+  D
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  UNKNOWN
+}
+
+enum CustomerSource {
+  PORTAL
+  ONLINE_PLATFORM
+  WALK_IN
+  REFERRAL
+  PHONE_IN
+  WECHAT
+  OLD_CUSTOMER
+  COMMUNITY_EVENT
+  ADVERTISEMENT
+  OTHER
+}
+
+enum PurchasePurpose {
+  SELF_LIVE
+  IMPROVE
+  SCHOOL
+  INVESTMENT
+  MARRIAGE
+  ELDERLY_CARE
+  OTHER
+}
+
+enum PaymentMethod {
+  FULL
+  MORTGAGE
+  COMBINED
+  HOUSING_FUND
+  UNKNOWN
+}
+
+enum LoanStatus {
+  NOT_STARTED
+  PREPARING
+  SUBMITTED
+  APPROVED
+  REJECTED
+  NOT_NEEDED
+}
+
+enum PurchaseTimeline {
+  URGENT
+  ONE_MONTH
+  THREE_MONTHS
+  HALF_YEAR
+  ONE_YEAR
+  UNDECIDED
+}
+
+enum FloorPreference {
+  LOW
+  MIDDLE
+  HIGH
+  TOP
+  ANY
+}
+
+enum DecorationPreference {
+  ROUGH
+  SIMPLE
+  FINE
+  LUXURY
+  ANY
+}
+
+enum PropertyAgePreference {
+  WITHIN_5
+  WITHIN_10
+  WITHIN_20
+  ANY
+}
+
+// ============================================================================
+// 客户
+// ============================================================================
+
+/// 客户主表。
+/// 需求文档 §7 要求的全部字段都在这里；价格类字段单位一律为「元」。
+model Customer {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store          Store?  @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  /// 负责经纪人
+  assignedAgentId String?
+  assignedAgent   User?  @relation("CustomerAssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  /// 录入人
+  createdById String?
+  createdBy   User?  @relation("CustomerCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  // ---- 基本资料 ----
+  name   String
+  phone  String
+  wechat String?
+  gender Gender @default(UNKNOWN)
+  /// 年龄
+  age    Int?
+  /// 家庭结构描述，如「夫妻+1孩」
+  familyStructure String?
+  source CustomerSource @default(OTHER)
+  /// 来源备注，如「贝壳端口 10 月 3 日」
+  sourceDetail String?
+
+  // ---- 状态 ----
+  status      CustomerStatus @default(NEW)
+  intentLevel IntentLevel?
+  /// 销售打的标签
+  tags String[] @default([])
+
+  // ---- 显性需求（客户自己说的）----
+  budgetMin Int?
+  budgetMax Int?
+  preferredCity      String  @default("上海")
+  preferredDistricts String[] @default([])
+  preferredCommunities String[] @default([])
+  bedrooms     Int[] @default([])
+  livingRooms  Int?
+  areaMin      Int?
+  areaMax      Int?
+  propertyAgePreference PropertyAgePreference?
+  floorPreference       FloorPreference?
+  decorationPreference  DecorationPreference?
+  /// 学区要求描述
+  schoolPreference String?
+  /// 可接受的最远地铁步行米数
+  subwayDistanceMax Int?
+  /// 通勤地点，结构见 CommuteLocation[]
+  commuteLocations Json @default("[]")
+  purchasePurpose  PurchasePurpose?
+  paymentMethod    PaymentMethod?
+  /// 首付预算（元）
+  downPaymentBudget Int?
+  loanRequirement   String?
+  loanStatus        LoanStatus @default(NOT_STARTED)
+  purchaseTimeline  PurchaseTimeline?
+  notes             String?
+
+  // ---- AI 派生指标（由画像/评分引擎写入）----
+  /// AI 意向分 0～100
+  intentScore       Int?
+  intentScoreLevel  String?
+  intentScoreAt     DateTime?
+  /// 行为画像整体置信度 0～1
+  profileConfidence Decimal? @db.Decimal(4, 3)
+  /// 画像最后计算时间
+  profileUpdatedAt  DateTime?
+  /// 需求漂移强度 0～1
+  preferenceDriftScore Decimal? @db.Decimal(4, 3)
+
+  // ---- 跟进节奏 ----
+  lastContactAt       DateTime?
+  nextFollowUpAt      DateTime?
+  /// 带看次数
+  viewingCount        Int @default(0)
+  /// 累计行为事件数
+  behaviorEventCount  Int @default(0)
+  /// 最后活跃时间（客户在专属页面上的行为）
+  lastActiveAt        DateTime?
+
+  // ---- 隐私合规 ----
+  /// 是否同意行为分析
+  consentBehaviorTracking Boolean @default(true)
+  /// 是否同意个性化推荐
+  consentPersonalization  Boolean @default(true)
+  /// 同意时间
+  consentGrantedAt DateTime?
+  /// 撤回同意时间
+  consentRevokedAt DateTime?
+  /// 同意时的隐私政策版本
+  consentPolicyVersion String?
+  /// 数据删除请求时间（软删除，等待合规流程处理）
+  dataDeletionRequestedAt DateTime?
+
+  /// 软删除
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ---- 关系 ----
+  profile            CustomerProfile?
+  behavioralProfile  CustomerBehavioralProfile?
+  behaviorEvents     CustomerBehaviorEvent[]
+  shareLinks         CustomerShareLink[]
+  favorites          Favorite[]
+  comparisons        Comparison[]
+  matches            CustomerPropertyMatch[]
+  viewings           Viewing[]
+  communications     Communication[]
+  opportunities      Opportunity[]
+  notifications      Notification[]
+  tasks              Task[]
+  consentLogs        ConsentLog[]
+  voiceNotes         VoiceNote[]
+  intentScoreHistory IntentScoreHistory[]
+
+  // Phase 11 新增（微信复制 → AI 需求 → 贝壳 → 推荐闭环）
+  messageImports            CustomerMessageImport[]
+  requirementProfile        CustomerRequirementProfile?
+  requirementSnapshots      CustomerRequirementSnapshot[]
+  propertyFeedbacks         CustomerPropertyFeedback[]
+  recommendationBatches     RecommendationBatch[]
+  generatedReplies          GeneratedCustomerReply[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, assignedAgentId, status])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, phone])
+  @@index([organizationId, intentLevel])
+  @@index([organizationId, lastActiveAt])
+  @@index([organizationId, nextFollowUpAt])
+  @@index([storeId])
+  @@index([assignedAgentId])
+  @@index([deletedAt])
+  @@map("customers")
+}
+
+/// 显性需求画像（客户自己说的）—— 与 Customer 一对一。
+/// 单独成表的原因：字段多、更新频繁，且需要保留「原始说法」与「结构化字段」的对照。
+model CustomerProfile {
+  id         String   @id @default(cuid())
+  customerId String   @unique
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// 销售录入的原始需求描述（保留自然语言原文，防止结构化时丢信息）
+  rawRequirementText String?
+  /// 结构化需求（JSON，符合 ExplicitProfile 结构）
+  explicit Json @default("{}")
+
+  /// 需求明确度 0～1：字段填写越完整越高
+  clarityScore Decimal? @db.Decimal(4, 3)
+  /// 明确度说明
+  clarityNote  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("customer_profiles")
+}
+
+/// 行为画像（AI 观察到的真实需求）—— 与 Customer 一对一。
+/// 由行为评分与偏好引擎计算写入，结构符合 BehavioralProfile。
+model CustomerBehavioralProfile {
+  id         String   @id @default(cuid())
+  customerId String   @unique
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// 完整行为画像（JSON，符合 BehavioralProfile）
+  profile Json @default("{}")
+
+  /// 从行为推断的预算区间下界（元），单独成列以便硬筛与排序
+  inferredBudgetMin Int?
+  inferredBudgetMax Int?
+  /// 从行为推断的面积区间
+  inferredAreaMin Int?
+  inferredAreaMax Int?
+  /// 预算置信度 0～1
+  budgetConfidence Decimal? @db.Decimal(4, 3)
+
+  /// 偏好区域 Top N（冗余，便于查询与展示）
+  topDistricts String[] @default([])
+  topCommunities String[] @default([])
+
+  /// 整体置信度 0～1
+  confidence Decimal @default(0) @db.Decimal(4, 3)
+  /// 参与计算的样本量
+  sampleSize Int @default(0)
+
+  /// 统计窗口
+  windowStart DateTime?
+  windowEnd   DateTime?
+
+  /// AI 生成的自然语言小结
+  reasoningSummary String?
+  /// 是否由 AI 生成（false 表示规则引擎降级）
+  aiGenerated Boolean @default(false)
+
+  /// 上一次需求漂移检测结果（JSON，符合 PreferenceDriftResult）
+  driftResult Json?
+  driftDetectedAt DateTime?
+
+  /// 向量表示，用于语义匹配（由 AI Embedding 写入；无 AI 时为 NULL）
+  embedding Unsupported("vector(1536)")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([inferredBudgetMin, inferredBudgetMax])
+  @@index([confidence])
+  @@map("customer_behavior_profiles")
+}
+
+/// 意向分历史，用于观察客户升温/降温趋势
+model IntentScoreHistory {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  score Int
+  level String
+  /// 各因子得分（JSON，符合 IntentScoreFactor[]）
+  factors Json @default("[]")
+  /// 触发原因
+  trigger String?
+
+  createdAt DateTime @default(now())
+
+  @@index([customerId, createdAt])
+  @@map("intent_score_history")
+}
+
+// ============================================================================
+// 客户专属链接与隐私合规
+// ============================================================================
+
+/// 客户专属访问链接。经纪人发给客户，客户无需注册即可浏览。
+/// 安全要求：token 必须随机，不可反推客户 ID；支持过期、撤销、重新生成。
+model CustomerShareLink {
+  id         String   @id @default(cuid())
+  organizationId String
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// 创建人（经纪人）
+  createdById String?
+
+  /// 随机 token（CSPRNG，16 位 URL 安全字符）
+  token String @unique
+  /// 展示用短码，形如 7Ha92Ks
+  shortCode String @unique
+
+  /// 链接用途说明，如「10 月浦东三房推荐」
+  label String?
+
+  /// 是否启用
+  isActive Boolean @default(true)
+  /// 过期时间，null 表示不过期
+  expiresAt DateTime?
+  /// 访问次数
+  visitCount Int @default(0)
+  /// 独立会话数
+  sessionCount Int @default(0)
+  /// 首次访问时间
+  firstVisitedAt DateTime?
+  /// 最后访问时间
+  lastVisitedAt DateTime?
+
+  /// 撤销信息
+  revokedAt DateTime?
+  revokedReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([organizationId])
+  @@index([isActive])
+  @@index([expiresAt])
+  @@map("customer_share_links")
+}
+
+/// 隐私同意记录。合规要求：必须能证明客户何时同意了哪个版本的政策。
+model ConsentLog {
+  id         String   @id @default(cuid())
+  organizationId String
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// 同意类型
+  consentType String
+  /// 是否同意
+  granted Boolean
+  /// 政策版本号
+  policyVersion String
+  /// 客户看到的说明文案快照
+  policyTextSnapshot String?
+  /// 加盐哈希 IP，不留明文
+  ipHash String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([organizationId])
+  @@map("consent_logs")
+}
+
+// ============================================================================
+// 房源域枚举
+// ============================================================================
+
+enum PropertyType {
+  APARTMENT
+  VILLA
+  TOWNHOUSE
+  SHOP
+  OFFICE
+  OTHER
+}
+
+enum ListingStatus {
+  ACTIVE
+  PENDING
+  SOLD
+  DELISTED
+  SUSPENDED
+}
+
+/// 房源核验状态（Phase 12）
+///
+/// 语义：这条房源"能不能放心发给客户"。
+///   VERIFIED —— 近期核验过仍在售，可以发
+///   PENDING  —— 尚未核验，或数据来自无法实时核验的渠道（如经纪人手动录入）
+///   EXPIRED  —— 核验已过期（超过时效窗口），发之前必须重新确认
+enum PropertyVerificationStatus {
+  VERIFIED
+  PENDING
+  EXPIRED
+}
+
+enum OwnershipType {
+  FREEHOLD
+  HOUSING_REFORM
+  AFFORDABLE
+  RELOCATION
+  COMMERCIAL
+  OTHER
+}
+
+enum Decoration {
+  ROUGH
+  SIMPLE
+  FINE
+  LUXURY
+}
+
+enum Orientation {
+  SOUTH
+  NORTH
+  EAST
+  WEST
+  SOUTHEAST
+  SOUTHWEST
+  NORTHEAST
+  NORTHWEST
+  SOUTH_NORTH
+}
+
+enum PropertyProviderKind {
+  MOCK
+  BEIKE
+  ANJUKE
+  INTERNAL
+}
+
+enum ImageCategory {
+  INTERIOR
+  EXTERIOR
+  FLOOR_PLAN
+  COMMUNITY
+  MAP
+  OTHER
+}
+
+// ============================================================================
+// 房源
+// ============================================================================
+
+/// 房源主表。所有外部 Provider 的数据都归一化后写入这里。
+/// 价格单位统一为「元」；面积单位为「㎡」。
+model Property {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // ---- 外部来源 ----
+  externalProvider PropertyProviderKind @default(MOCK)
+  externalId       String
+  /// Provider 原始数据，保留以便追溯与重新解析
+  rawData Json?
+
+  /// 贝壳完整详情（entity_detail + entity_material 解析后的结构化数据）
+  ///
+  /// 包含：房屋信息（19 项）、小区信息（20 项）、周边配套（按距离排序）、图片列表。
+  /// 存库的理由：这是花 API 配额换来的数据，缓存降级或重启后不应丢失。
+  /// 界面展示时必须显示 detailFetchedAt，让经纪人知道数据的新鲜度。
+  fullDetail Json?
+
+  /// 完整详情的获取时间（用于界面标注"详情获取于 X 分钟前"）
+  detailFetchedAt DateTime?
+
+  // ---- 位置 ----
+  city        String
+  district    String
+  subDistrict String?
+  community   String
+  title       String
+  address     String?
+  longitude   Decimal? @db.Decimal(10, 7)
+  latitude    Decimal? @db.Decimal(10, 7)
+
+  // ---- 价格 ----
+  /// 总价（元）
+  totalPrice BigInt
+  /// 单价（元/㎡）
+  unitPrice  Int
+
+  // ---- 户型 ----
+  bedrooms   Int
+  livingRooms Int @default(0)
+  bathrooms  Int @default(0)
+  /// 建筑面积（㎡）
+  area       Decimal @db.Decimal(8, 2)
+
+  // ---- 楼层 ----
+  floor       Int?
+  totalFloors Int?
+
+  // ---- 房屋属性 ----
+  orientation  Orientation?
+  buildYear    Int?
+  propertyType PropertyType @default(APARTMENT)
+  ownershipType OwnershipType?
+  decoration   Decoration?
+  elevator     Boolean?
+
+  // ---- 配套 ----
+  /// 到最近地铁站的步行距离（米）
+  subwayDistance Int?
+  /// 地铁信息（JSON，符合 SubwayInfo）
+  subwayInfo Json?
+  /// 学区信息（JSON，符合 SchoolInfo）
+  schoolInfo Json?
+  /// 物业公司
+  propertyManagementCompany String?
+  /// 物业费（元/㎡/月）
+  propertyFee Decimal? @db.Decimal(6, 2)
+
+  // ---- 展示 ----
+  tags        String[] @default([])
+  /// 户型图 URL 列表
+  floorPlan   String[] @default([])
+  /// 封面图
+  coverImage  String?
+  description String?
+
+  // ---- 状态与时间 ----
+  listingStatus   ListingStatus @default(ACTIVE)
+  listingDate     DateTime?
+  lastPriceChange DateTime?
+  /// 最后一次从 Provider 同步成功的时间
+  lastSyncedAt    DateTime?
+  /// 是否重新挂牌过
+  wasRelisted     Boolean @default(false)
+  /// 下架时间
+  delistedAt      DateTime?
+
+  // ---- 数据可信度（Phase 12）----
+  //
+  // 为什么需要这三个字段：房源来自不同渠道，可信度**差别巨大**：
+  //   贝壳实时 API   → 刚查到的，可信度最高
+  //   公司自有房源   → 自己维护的，可信度高
+  //   经纪人手动录入 → 可能是几周前抄的，需要确认
+  //   本地缓存       → 是历史快照，可能已成交
+  //
+  // 把"这条数据有多可信"显式建模，而不是靠代码里的隐式假设 ——
+  // 否则经纪人会把过期房源发给客户，这是**不可接受的错误**。
+
+  /// 数据可信度评分 0~100。由 Provider 的 sourceType 决定基础分，再按核验新鲜度衰减。
+  /// 注意：**它不参与"需求匹配度"计算**，只作为独立维度影响最终排序，
+  /// 绝不能让"来自贝壳"这件事本身给房源加分（那会破坏公平性）。
+  dataReliabilityScore Int @default(50)
+
+  /// 最后一次**确认在售**的时间。
+  /// 与 lastSyncedAt 的区别：lastSyncedAt 是"同步到了数据"，
+  /// lastVerifiedAt 是"确认过它还在卖" —— 后者才决定能不能发给客户。
+  lastVerifiedAt DateTime?
+
+  /// 核验状态
+  verificationStatus PropertyVerificationStatus @default(PENDING)
+
+  /// 搜索优化：小区名归一化后的小写形式，用于跨来源匹配同一小区
+  communityNormalized String?
+  /// 区域归一化形式
+  districtNormalized  String?
+
+  // ---- 语义向量（由 AI Embedding 写入；无 AI 时为 NULL）----
+  embedding Unsupported("vector(1536)")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ---- 关系 ----
+  images         PropertyImage[]
+  priceHistory   PropertyPriceHistory[]
+  providerRecords PropertyProviderRecord[]
+  matches        CustomerPropertyMatch[]
+  behaviorEvents CustomerBehaviorEvent[]
+  favorites      Favorite[]
+  comparisons    Comparison[]
+  viewingProperties ViewingProperty[]
+  opportunities  Opportunity[]
+
+  // Phase 11 新增
+  customerFeedbacks CustomerPropertyFeedback[]
+
+  @@unique([organizationId, externalProvider, externalId])
+  @@index([organizationId, listingStatus])
+  @@index([organizationId, city, district])
+  @@index([organizationId, community])
+  @@index([organizationId, totalPrice])
+  @@index([organizationId, area])
+  @@index([organizationId, bedrooms])
+  @@index([organizationId, buildYear])
+  @@index([organizationId, listingStatus, totalPrice])
+  @@index([organizationId, districtNormalized, listingStatus])
+  @@index([organizationId, lastPriceChange])
+  @@index([communityNormalized])
+  /// 推荐排序用：按可信度与核验状态筛选"能放心发给客户"的房源
+  @@index([organizationId, verificationStatus, dataReliabilityScore])
+  @@index([lastVerifiedAt])
+  @@map("properties")
+}
+
+/// 房源图片
+model PropertyImage {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  url      String
+  category ImageCategory @default(INTERIOR)
+  sortOrder Int @default(0)
+  caption  String?
+  /// 图片宽度/高度，便于前端预留占位避免布局抖动
+  width  Int?
+  height Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([propertyId, sortOrder])
+  @@index([propertyId, category])
+  @@map("property_images")
+}
+
+/// 价格历史。价格变化必须保存历史，这是「降价机会」的数据基础。
+model PropertyPriceHistory {
+  id         String   @id @default(cuid())
+  organizationId String
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  oldPrice BigInt
+  newPrice BigInt
+  /// 变化额（元），负数表示降价
+  change   BigInt
+  /// 变化百分比，如 -5.28 表示降价 5.28%
+  changePercent Decimal @db.Decimal(7, 3)
+  /// 单价变化
+  oldUnitPrice Int?
+  newUnitPrice Int?
+  /// 变化原因：PROVIDER_SYNC / MANUAL / OWNER_ADJUST
+  reason String?
+
+  createdAt DateTime @default(now())
+
+  @@index([propertyId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("property_price_history")
+}
+
+/// Provider 同步记录。记录每次从外部拉取到的原始状态，
+/// 用于排查「为什么这条数据变了」以及增量同步。
+model PropertyProviderRecord {
+  id         String   @id @default(cuid())
+  organizationId String
+  propertyId String?
+  property   Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  provider PropertyProviderKind
+  externalId String
+  /// 本次拉取到的完整归一化数据快照
+  payload Json
+  /// 本次同步发现的变化类型
+  changeType String?
+  /// 同步批次 ID，便于按批次排查
+  syncBatchId String?
+  /// 是否成功
+  success Boolean @default(true)
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+
+  @@index([provider, externalId])
+  @@index([organizationId, createdAt])
+  @@index([syncBatchId])
+  @@map("property_provider_records")
+}
+
+/// Provider 配置（超管后台管理）。贝壳等官方 API 的凭证与限流配置。
+/// 注意：密钥字段在数据库中加密存储，接口返回时脱敏。
+model PropertyProviderConfig {
+  id             String @id @default(cuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  provider PropertyProviderKind
+  /// 是否启用
+  enabled  Boolean @default(false)
+  /// 是否使用平台级凭证（由超管统一配置，租户直接使用）
+  usePlatformCredentials Boolean @default(true)
+
+  appId     String?
+  appKey    String?
+  /// 加密后的 secret
+  appSecretEncrypted String?
+  baseUrl   String?
+  cityCode  String?
+
+  /// 限流配置
+  rateLimitPerMinute Int @default(60)
+  /// 同步周期（cron）
+  syncCron String? @default("0 */6 * * *")
+
+  /// 最近一次同步结果
+  lastSyncAt     DateTime?
+  lastSyncStatus String?
+  lastSyncError  String?
+  lastSyncCount  Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, provider])
+  @@index([provider, enabled])
+  @@map("property_provider_configs")
+}
+
+// ============================================================================
+// 客户行为采集
+// ============================================================================
+//
+// 合规红线：
+//   - 只采集客户访问本平台产生的行为，绝不采集通讯录/相册/第三方 App 历史。
+//   - 不存明文 IP，只存加盐哈希（ipHash）。
+//   - 客户撤回同意后，行为采集立即停止。
+// ============================================================================
+
+enum BehaviorEventType {
+  PAGE_VIEW
+  PROPERTY_VIEW
+  PROPERTY_REVISIT
+  PROPERTY_SKIP
+  IMAGE_VIEW
+  IMAGE_GALLERY_COMPLETE
+  FLOOR_PLAN_VIEW
+  MAP_VIEW
+  COMMUNITY_VIEW
+  PRICE_HISTORY_VIEW
+  SCHOOL_VIEW
+  SUBWAY_VIEW
+  COMMUTE_VIEW
+  PROPERTY_FAVORITE
+  PROPERTY_UNFAVORITE
+  PROPERTY_COMPARE
+  PROPERTY_SHARE
+  CONTACT_AGENT
+  BOOK_VIEWING
+  SEARCH
+  FILTER_CHANGE
+}
+
+enum DeviceType {
+  DESKTOP
+  MOBILE
+  TABLET
+  UNKNOWN
+}
+
+enum ScoringConditionKind {
+  ALWAYS
+  DURATION_OVER
+  DURATION_UNDER
+  REPEAT_OVER
+  SKIP_STREAK_OVER
+}
+
+/// 行为评分规则。管理员可在后台调整权重，代码中禁止硬编码分值。
+/// 后续可替换为机器学习模型：只需新增 ruleKind 类型并实现对应评分器。
+model BehaviorScoringRule {
+  id             String @id @default(cuid())
+  /// 空表示平台级默认规则，所有组织共用；有值表示该组织的覆盖规则
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// 规则名，后台展示
+  name        String
+  eventType   BehaviorEventType
+  /// 得分，可为负
+  score       Int
+  conditionKind  ScoringConditionKind @default(ALWAYS)
+  /// 条件阈值：DURATION_* 为秒，REPEAT_*/SKIP_STREAK_* 为次数
+  conditionValue Int?
+  /// 同一房源同一天最多计分次数，null 表示不限
+  maxPerPropertyPerDay Int?
+  enabled  Boolean @default(true)
+  /// 优先级，数值小的先算
+  priority Int @default(100)
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, name])
+  @@index([organizationId, enabled])
+  @@index([eventType])
+  @@map("behavior_scoring_rules")
+}
+
+/// 客户行为事件。这是整个产品最重要的数据来源。
+model CustomerBehaviorEvent {
+  id             String @id @default(cuid())
+  organizationId String
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// 关联房源（页面级事件可为空）
+  propertyId String?
+  property   Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  /// 会话 ID，由前端生成
+  sessionId String
+  eventType BehaviorEventType
+
+  /// 扩展信息：图片序号、搜索词、筛选条件、对比房源列表等
+  metadata Json?
+  /// 停留时长（秒）
+  duration Int?
+  device   DeviceType @default(UNKNOWN)
+  /// 来源渠道：wechat / sms / direct / qr
+  source   String?
+  /// 加盐哈希 IP —— 绝不存明文
+  ipHash   String?
+  userAgent String?
+
+  /// 该事件按规则计算出的分数（可为负）
+  score Int @default(0)
+  /// 命中的规则 ID 列表，便于解释分数来源
+  appliedRuleIds String[] @default([])
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([customerId, eventType])
+  @@index([propertyId, createdAt])
+  @@index([sessionId])
+  @@index([customerId, propertyId])
+  @@map("customer_behavior_events")
+}
+
+/// 客户收藏
+model Favorite {
+  id             String @id @default(cuid())
+  organizationId String
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  propertyId     String
+  property       Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  /// 收藏时房源价格，用于「收藏后降价」提醒
+  priceAtFavorite BigInt?
+
+  createdAt DateTime @default(now())
+
+  @@unique([customerId, propertyId])
+  @@index([organizationId, createdAt])
+  @@index([propertyId])
+  @@map("favorites")
+}
+
+/// 客户房源对比（一次对比会话包含多套房源）
+model Comparison {
+  id             String @id @default(cuid())
+  organizationId String
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  propertyId     String
+  property       Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  /// 同一批对比的会话标识
+  groupId String
+  /// 在对比中的位置
+  position Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([customerId, groupId])
+  @@index([propertyId])
+  @@index([organizationId])
+  @@map("comparisons")
+}
+
+// ============================================================================
+// 智能匹配
+// ============================================================================
+
+enum MatchLevel {
+  PERFECT
+  HIGH
+  MEDIUM
+  LOW
+  WEAK
+}
+
+enum MatchTrigger {
+  CUSTOMER_UPDATED
+  BEHAVIOR_UPDATED
+  CUSTOMER_CREATED
+  PROPERTY_CREATED
+  PRICE_CHANGED
+  STATUS_CHANGED
+  MANUAL
+  SCHEDULED
+}
+
+/// 客户 ↔ 房源匹配结果。由三阶段匹配引擎写入。
+model CustomerPropertyMatch {
+  id             String @id @default(cuid())
+  organizationId String
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  propertyId     String
+  property       Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  /// 负责经纪人，冗余以便按经纪人快速查询
+  assignedAgentId String?
+
+  /// 匹配总分 0～100
+  score     Int
+  level     MatchLevel
+  /// 各维度得分明细（JSON，符合 MatchReason[]）
+  reasons   Json @default("[]")
+  /// 加分项清单
+  highlights String[] @default([])
+  /// 不符合项清单
+  concerns   String[] @default([])
+  /// AI 行为依据（JSON，符合 BehaviorEvidence[]）
+  behaviorEvidence Json @default("[]")
+  /// 一句话推荐理由
+  recommendation String?
+  /// 使用的匹配阶段
+  stagesApplied String[] @default([])
+
+  /// 硬性条件是否通过；未通过的记录也会保留，便于分析「为什么没推荐」
+  passedHardFilter Boolean @default(true)
+  hardFilterFailures String[] @default([])
+
+  /// 匹配时的房源价格快照，用于识别「推荐后降价」
+  priceAtMatch BigInt?
+
+  /// 触发原因
+  trigger MatchTrigger @default(SCHEDULED)
+  /// 是否已被经纪人查看
+  isViewed Boolean @default(false)
+  viewedAt DateTime?
+  /// 是否已被用于推荐给客户
+  isRecommended Boolean @default(false)
+  recommendedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([customerId, propertyId])
+  @@index([organizationId, score])
+  @@index([customerId, score])
+  @@index([propertyId, score])
+  @@index([assignedAgentId, score])
+  @@index([organizationId, createdAt])
+  @@map("customer_property_matches")
+}
+
+// ============================================================================
+// 销售机会
+// ============================================================================
+
+enum OpportunityType {
+  NEW_MATCH
+  PRICE_DROP
+  CUSTOMER_REVISIT
+  CUSTOMER_HIGH_ACTIVITY
+  CUSTOMER_DORMANT_REACTIVATED
+  PREFERENCE_CHANGED
+  LISTING_NEW
+  LISTING_RELIVE
+  VIEWING_FOLLOWUP
+  NEGOTIATION_FOLLOWUP
+  FOLLOWUP_OVERDUE
+}
+
+enum OpportunityPriority {
+  URGENT
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum OpportunityStatus {
+  OPEN
+  ACKNOWLEDGED
+  ACTIONED
+  DISMISSED
+  EXPIRED
+}
+
+/// 销售机会。每条机会必须回答：为什么是现在、为什么是这个客户、下一步做什么。
+model Opportunity {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store          Store? @relation(fields: [storeId], references: [id], onDelete: SetNull)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  propertyId String?
+  property   Property? @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  assignedAgentId String?
+  assignedAgent   User? @relation("OpportunityAssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+
+  type     OpportunityType
+  priority OpportunityPriority
+  status   OpportunityStatus @default(OPEN)
+
+  title  String
+  /// 「为什么」—— 完整原因说明
+  reason String
+  /// 「怎么做」—— 给经纪人的具体行动建议
+  suggestion String
+
+  /// 机会价值分 0～100，用于排序
+  valueScore Int @default(0)
+  /// 预期成交贡献（元）
+  expectedValue BigInt?
+  /// 支撑证据（JSON，符合 OpportunityEvidence[]）
+  evidence Json @default("[]")
+
+  /// 关联匹配分
+  matchScore Int?
+  /// 建议在此时间前联系
+  suggestedContactBy DateTime?
+
+  /// 去重指纹，避免同一事件反复产生机会
+  dedupeKey String
+  /// 过期时间
+  expiresAt DateTime?
+
+  handledAt      DateTime?
+  handledByUserId String?
+  handledBy      User? @relation("OpportunityHandledBy", fields: [handledByUserId], references: [id], onDelete: SetNull)
+  /// 处理备注
+  handleNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, dedupeKey])
+  @@index([organizationId, status, valueScore])
+  @@index([organizationId, priority, status])
+  @@index([assignedAgentId, status, valueScore])
+  @@index([customerId, status])
+  @@index([propertyId, status])
+  @@index([organizationId, type, createdAt])
+  @@index([expiresAt])
+  @@map("opportunities")
+}
+
+// ============================================================================
+// 通知中心
+// ============================================================================
+
+enum NotificationType {
+  PRICE_DROP
+  NEW_MATCH
+  CUSTOMER_ACTIVE
+  CUSTOMER_REVISIT
+  FOLLOWUP_DUE
+  VIEWING_REMINDER
+  PREFERENCE_CHANGE
+  HIGH_INTENT
+}
+
+enum NotificationPriority {
+  URGENT
+  HIGH
+  NORMAL
+  LOW
+}
+
+model Notification {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type     NotificationType
+  priority NotificationPriority @default(NORMAL)
+
+  title String
+  body  String
+  /// 点击跳转的前端路由
+  link  String?
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  propertyId String?
+
+  opportunityId String?
+
+  isRead Boolean   @default(false)
+  readAt DateTime?
+
+  /// 去重指纹
+  dedupeKey String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([userId, priority, isRead])
+  @@index([dedupeKey])
+  @@map("notifications")
+}
+
+// ============================================================================
+// 带看
+// ============================================================================
+
+enum ViewingStatus {
+  PLANNED
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum ViewingFeedbackLiked {
+  LIKE
+  DISLIKE
+  NEUTRAL
+}
+
+enum IntentTrend {
+  WARMING
+  STABLE
+  COOLING
+}
+
+model Viewing {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  storeId        String?
+  store          Store? @relation(fields: [storeId], references: [id], onDelete: SetNull)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agentId    String
+  agent      User     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  scheduledAt DateTime
+  completedAt DateTime?
+  status      ViewingStatus @default(PLANNED)
+
+  /// 带看前备注
+  notes String?
+  /// 带看后反馈原文（可能是语音转写结果）
+  feedback String?
+  /// 客户总体满意度 1～5
+  satisfaction Int?
+
+  /// AI 结构化分析结果（JSON，符合 ViewingAnalysis）
+  analysis Json?
+  analysisAt DateTime?
+  analysisAiGenerated Boolean @default(false)
+
+  /// 客户爽约/取消原因
+  cancelReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  properties ViewingProperty[]
+  voiceNotes VoiceNote[]
+
+  @@index([organizationId, scheduledAt])
+  @@index([customerId, scheduledAt])
+  @@index([agentId, scheduledAt])
+  @@index([organizationId, status, scheduledAt])
+  @@index([storeId, scheduledAt])
+  @@map("viewings")
+}
+
+/// 带看中的单套房源及其反馈
+model ViewingProperty {
+  id         String   @id @default(cuid())
+  viewingId  String
+  viewing    Viewing  @relation(fields: [viewingId], references: [id], onDelete: Cascade)
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  /// 第几套看的
+  visitOrder Int @default(0)
+  /// 客户是否喜欢
+  liked ViewingFeedbackLiked @default(NEUTRAL)
+  /// 优点
+  pros String[] @default([])
+  /// 缺点/反对点
+  cons String[] @default([])
+  /// 客户对该套的心理价位（元）
+  customerPrice BigInt?
+  /// 客户原话
+  customerComment String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([viewingId, propertyId])
+  @@index([propertyId])
+  @@map("viewing_properties")
+}
+
+// ============================================================================
+// 沟通记录
+// ============================================================================
+
+enum CommunicationChannel {
+  WECHAT
+  PHONE
+  SMS
+  FACE_TO_FACE
+  IN_APP
+  OTHER
+}
+
+enum CommunicationDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum CommunicationSource {
+  MANUAL
+  PASTED_TRANSCRIPT
+  VOICE_TRANSCRIBED
+  AI_GENERATED
+}
+
+enum Sentiment {
+  VERY_POSITIVE
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  VERY_NEGATIVE
+}
+
+enum CommunicationIntent {
+  PRICE_INQUIRY
+  SCHEDULE_VIEWING
+  NEGOTIATION
+  LOAN_QUESTION
+  POLICY_QUESTION
+  OBJECTION
+  REQUEST_MORE_OPTIONS
+  REJECTION
+  HESITATION
+  SMALL_TALK
+  OTHER
+}
+
+/// 沟通记录。支持粘贴微信聊天记录后由 AI 分析并更新画像。
+model Communication {
+  id             String @id @default(cuid())
+  organizationId String
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agentId        String
+  agent          User     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  channel   CommunicationChannel
+  direction CommunicationDirection
+  source    CommunicationSource @default(MANUAL)
+
+  /// 原始内容
+  content String
+  /// AI 摘要
+  summary String?
+  /// AI 判断的客户情绪
+  sentiment Sentiment?
+  /// AI 判断的沟通意图
+  intent CommunicationIntent?
+
+  /// AI 识别出的客户异议点
+  objections String[] @default([])
+  /// AI 识别出的预算变化（元）
+  budgetChange BigInt?
+  /// AI 识别出的购房时间线索
+  timelineHint String?
+  /// AI 识别出的需求变化点
+  requirementChanges String[] @default([])
+  /// 建议的下一步动作
+  nextActions String[] @default([])
+  /// 完整 AI 分析结果（JSON，符合 CommunicationAnalysis）
+  analysis Json?
+  analysisAt DateTime?
+  analysisAiGenerated Boolean @default(false)
+
+  /// 是否已用于更新客户画像
+  appliedToProfile Boolean @default(false)
+
+  /// 沟通发生时间
+  occurredAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, occurredAt])
+  @@index([customerId, occurredAt])
+  @@index([agentId, occurredAt])
+  @@index([customerId, channel])
+  @@map("communications")
+}
+
+// ============================================================================
+// 语音记录
+// ============================================================================
+
+enum VoiceNoteStatus {
+  UPLOADED
+  TRANSCRIBING
+  TRANSCRIBED
+  FAILED
+}
+
+enum VoiceNoteAnalysisKind {
+  VIEWING_FEEDBACK
+  COMMUNICATION
+}
+
+/// 语音快速记录。第一版以文本模式为主，接口与服务抽象已就绪，
+/// 后续接入真实 ASR 只需替换 TranscriptionService 实现。
+model VoiceNote {
+  id             String @id @default(cuid())
+  organizationId String
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agentId        String
+
+  /// 语音文件地址；文本模式为空
+  audioUrl String?
+  /// 时长（秒）
+  durationSeconds Int?
+  status VoiceNoteStatus @default(UPLOADED)
+
+  /// 转写文本；文本模式时即为直接输入的内容
+  transcript String?
+  /// 转写服务名与置信度
+  transcriptionProvider String?
+  transcriptionConfidence Decimal? @db.Decimal(4, 3)
+
+  /// 关联带看
+  viewingId String?
+  viewing   Viewing? @relation(fields: [viewingId], references: [id], onDelete: SetNull)
+
+  /// 由该记录生成的结构化分析类型
+  analysisKind VoiceNoteAnalysisKind?
+  analysis     Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([viewingId])
+  @@map("voice_notes")
+}
+
+// ============================================================================
+// 任务
+// ============================================================================
+
+enum TaskType {
+  FOLLOW_UP
+  VIEWING_PREP
+  VIEWING_FOLLOWUP
+  NEGOTIATION
+  PAPERWORK
+  CALL
+  OTHER
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  URGENT
+  HIGH
+  NORMAL
+  LOW
+}
+
+/// 跟进任务。AI 建议可以一键转成任务。
+model Task {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  propertyId String?
+
+  assignedAgentId String?
+  assignedAgent   User? @relation("TaskAssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  createdById     String?
+  createdBy       User? @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  type     TaskType     @default(FOLLOW_UP)
+  status   TaskStatus   @default(PENDING)
+  priority TaskPriority @default(NORMAL)
+
+  title       String
+  description String?
+  dueAt       DateTime?
+  completedAt DateTime?
+  /// 由哪条机会生成
+  opportunityId String?
+  /// 是否由 AI 建议生成
+  aiGenerated Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, status, dueAt])
+  @@index([assignedAgentId, status, dueAt])
+  @@index([customerId])
+  @@map("tasks")
+}
+
+// ============================================================================
+// AI 模块
+// ============================================================================
+
+enum AiProviderKind {
+  MOCK
+  DEEPSEEK
+  OPENAI
+  ANTHROPIC
+}
+
+enum AiRunStatus {
+  SUCCESS
+  FAILED
+  FALLBACK
+}
+
+enum ChatRole {
+  SYSTEM
+  USER
+  ASSISTANT
+  TOOL
+}
+
+/// AI 助手会话
+model AiConversation {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title String @default("新对话")
+  /// 累计 token，用于配额统计
+  totalTokens Int @default(0)
+  messageCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages AiMessage[]
+
+  @@index([organizationId, userId, updatedAt])
+  @@map("ai_conversations")
+}
+
+/// AI 助手消息
+model AiMessage {
+  id             String @id @default(cuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  role ChatRole
+  content String
+
+  /// 本轮工具调用明细（JSON）
+  toolInvocations Json @default("[]")
+  /// 引用到的实体，用于前端生成可点击链接（JSON）
+  citations Json @default("[]")
+
+  tokens Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+  @@map("ai_messages")
+}
+
+/// AI 调用记录。用于成本核算、效果分析与配额限制。
+model AiRun {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String?
+  user           User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  promptKey     String
+  promptVersion String
+  provider      AiProviderKind
+  model         String
+
+  status AiRunStatus @default(SUCCESS)
+
+  promptTokens     Int @default(0)
+  completionTokens Int @default(0)
+  totalTokens      Int @default(0)
+  durationMs       Int @default(0)
+
+  /// 关联实体，便于回溯「这次 AI 结论是为哪个客户生成的」
+  entityType String?
+  entityId   String?
+
+  /// 输入摘要（已脱敏，用于调试）
+  inputSummary  String?
+  /// 输出摘要
+  outputSummary String?
+  errorMessage  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, promptKey, createdAt])
+  @@index([organizationId, status])
+  @@index([entityType, entityId])
+  @@map("ai_runs")
+}
+
+// ============================================================================
+// Phase 11 — 微信复制 → AI 需求 → 贝壳 → 推荐闭环
+// ============================================================================
+//
+// 产品边界（重要）：
+//   本阶段使用**普通个人微信**，没有聊天 API。
+//   因此只做「人工复制 → 系统粘贴 → 系统生成 → 人工发送」。
+//   严禁开发微信 Hook、DLL 注入、PC 微信逆向、模拟协议、读取微信数据库。
+//   因此这里的「消息导入」只是**处理用户主动粘贴进来的文本**，不是微信 API。
+// ============================================================================
+
+/// 消息导入来源。目前只支持人工粘贴，未来可扩展短信/邮件等。
+enum MessageImportSource {
+  /// 经纪人从普通微信手动复制粘贴（当前唯一实现）
+  WECHAT_MANUAL_PASTE
+  /// 电话记录（人工整理）
+  PHONE_NOTE
+  /// 短信
+  SMS
+  /// 邮件
+  EMAIL
+  /// 其他
+  OTHER
+}
+
+/// 消息内容类型
+enum MessageImportType {
+  /// 客户发来的消息（需求表达）
+  CUSTOMER_MESSAGE
+  /// 客户对已推荐房源的反馈
+  PROPERTY_FEEDBACK
+  /// 经纪人自己的记录
+  AGENT_NOTE
+}
+
+/// 解析状态。失败也必须保留原文，绝不丢数据。
+enum MessageParseStatus {
+  PENDING
+  PARSING
+  SUCCESS
+  /// 部分字段解析成功
+  PARTIAL
+  FAILED
+}
+
+/// 客户对单套房源的反馈倾向
+enum PropertyFeedbackSentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  UNKNOWN
+}
+
+/// 反馈涉及的具体维度（用于累积"客户为什么喜欢/不喜欢"）
+enum FeedbackReactionType {
+  PRICE
+  LOCATION
+  LAYOUT
+  COMMUNITY
+  FLOOR
+  ORIENTATION
+  DECORATION
+  SCHOOL
+  SUBWAY
+  AGE
+  OTHER
+}
+
+/// 推荐批次状态。
+/// 注意：普通微信没有发送 API，系统无法知道客户是否收到，
+/// 因此只有 COPIED（已复制）与 SENT_CONFIRMED（人工确认已发送）两种，
+/// 绝不能自动记为 SENT。
+enum RecommendationStatus {
+  GENERATED
+  COPIED
+  SENT_CONFIRMED
+  DISCARDED
+}
+
+/// 微信回复文案风格
+enum ReplyStyle {
+  /// 自然专业（默认）
+  NATURAL_PROFESSIONAL
+  /// 简短
+  CONCISE
+  /// 详细
+  DETAILED
+}
+
+/// 粘贴导入的客户消息。
+/// 原始文本必须完整保存 —— 即使 AI 解析失败，也绝不能让数据丢失。
+model CustomerMessageImport {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agentId        String
+
+  /// 原始文本（完整保留，不截断）
+  rawText String @db.Text
+  /// 来源渠道
+  source MessageImportSource @default(WECHAT_MANUAL_PASTE)
+  /// 内容类型
+  sourceType MessageImportType @default(CUSTOMER_MESSAGE)
+
+  /// 解析状态
+  parseStatus MessageParseStatus @default(PENDING)
+  /// AI 解析出的结构化需求（JSON，符合 RequirementExtraction）
+  parsedRequirements Json?
+  /// 解析错误信息（失败时记录，供排查）
+  parseError String?
+  /// 解析所用模型与耗时
+  parseModel   String?
+  parseDurationMs Int?
+
+  /// 由该消息生成的快照（若有变化）
+  snapshotId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([customerId, sourceType])
+  @@index([parseStatus])
+  @@map("customer_message_imports")
+}
+
+/// 客户显性需求画像（结构化、可累加）。
+///
+/// 核心设计：**三级预算模型**。
+/// 客户的需求是逐步透露的，不能互相覆盖：
+///   第一次"预算 500 万"        → target=500
+///   第二次"550 也可以"         → target 仍 500，normalMax=550
+///   第三次"特别好的 600 也能考虑" → stretchMax=600
+/// 这样需求只会越来越完整，而不会因为最后一句就丢掉前面的信息。
+model CustomerRequirementProfile {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customerId     String @unique
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  // ---- 城市与区域 ----
+  city String?
+  /// 区域（如 浦东新区）
+  districts String[] @default([])
+  /// 板块（如 张江）
+  subDistricts String[] @default([])
+  /// 具体小区
+  communities String[] @default([])
+
+  // ---- 三级预算（单位：元）----
+  /// 理想预算：客户最舒服的价格
+  budgetTarget Int?
+  /// 常规上限：可以接受到这个数
+  budgetNormalMax Int?
+  /// 极限上限：特别满意才会考虑
+  budgetStretchMax Int?
+  /// 严格上限：客户明确说"超过不看"时为 true，硬筛必须过滤
+  budgetStrictMax Boolean @default(false)
+  /// 预算下限
+  budgetMin Int?
+
+  // ---- 户型 ----
+  /// 期望卧室数（可多个）
+  bedrooms Int[] @default([])
+  /// 户型是否为硬性要求（客户说"只要三房"时为 true）
+  bedroomsStrict Boolean @default(false)
+  livingRooms Int?
+
+  // ---- 面积 ----
+  areaMin Int?
+  areaMax Int?
+
+  // ---- 房龄 ----
+  /// NEWER / WITHIN_5 / WITHIN_10 / WITHIN_20 / ANY
+  buildingAgePreference String?
+  /// 明确排除老小区
+  avoidOldCommunity Boolean @default(false)
+
+  // ---- 各维度优先级（HIGH / MEDIUM / LOW / UNKNOWN）----
+  communityQualityPriority String?
+  subwayPriority           String?
+  schoolPriority           String?
+  decorationPriority       String?
+  floorPreference          String?
+  orientationPreference    String?
+  /// 明确不要一楼/顶楼
+  avoidFirstFloor Boolean @default(false)
+  avoidTopFloor   Boolean @default(false)
+  /// 必须电梯
+  requireElevator Boolean @default(false)
+
+  // ---- 装修 ----
+  /// ROUGH / SIMPLE / FINE / LUXURY / ANY
+  decorationPreference String?
+  /// 必须精装
+  requireFineDecoration Boolean @default(false)
+
+  // ---- 学区 ----
+  /// 学区要求是否明确
+  schoolRequired Boolean @default(false)
+  schoolNotNeeded Boolean @default(false)
+  schoolNote String?
+
+  // ---- 交通 ----
+  /// 可接受的最远地铁步行米数
+  subwayDistanceMax Int?
+  /// 通勤地点
+  commuteLocations Json @default("[]")
+  /// 是否重视开车便利
+  carConvenience Boolean @default(false)
+
+  // ---- 购房意图 ----
+  purchasePurpose String?
+  paymentMethod   String?
+  purchaseTimeline String?
+  /// 决策参与者（SELF / SPOUSE / PARENTS / CHILD）
+  decisionMakers String[] @default([])
+  /// 家庭成员特殊关注点（如"老婆在意小区环境"）
+  familyConcerns Json @default("[]")
+
+  // ---- 其它 ----
+  /// 其它无法归类的补充要求
+  otherRequirements String[] @default([])
+  /// 整体置信度 0～1
+  confidence Decimal @default(0) @db.Decimal(4, 3)
+  /// 已完成的需求来源消息数
+  sourceMessageCount Int @default(0)
+  /// 最后一次更新来源消息
+  lastMessageId String?
+  /// 最后更新时间
+  lastUpdatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([budgetNormalMax])
+  @@index([city, districts])
+  @@map("customer_requirement_profiles")
+}
+
+/// 需求版本快照。用于回答"客户需求是怎么一步步变化的"。
+model CustomerRequirementSnapshot {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// 版本号，从 1 递增
+  version Int
+  /// 产生该版本的来源消息
+  sourceMessageId String?
+
+  /// 完整结构化需求快照（JSON）
+  structuredRequirements Json
+  /// 本次变化的字段名列表
+  changedFields String[] @default([])
+  /// 变化前的值（JSON，仅含变化字段）
+  previousValues Json?
+  /// 变化后的值（JSON，仅含变化字段）
+  newValues Json?
+  /// 本次变化的置信度 0～1
+  confidence Decimal @default(0.8) @db.Decimal(4, 3)
+  /// 人类可读的变化摘要（用于界面展示"AI 识别到以下变化"）
+  changeSummary Json @default("[]")
+  /// 是否包含覆盖型变更（客户明确改口，如"现在只要三房"）
+  hasOverride Boolean @default(false)
+  /// 是否有待人工确认的低置信度变更
+  needsConfirmation Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@unique([customerId, version])
+  @@index([organizationId, createdAt])
+  @@index([customerId, createdAt])
+  @@map("customer_requirement_snapshots")
+}
+
+/// 客户对具体房源的反馈。用于累积"客户为什么喜欢/不喜欢"。
+model CustomerPropertyFeedback {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  propertyId     String?
+  property       Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  /// 来源消息
+  sourceMessageId String?
+  /// 反馈中提到的房源序号（客户说"第一套"时为 1），用于在未匹配到 propertyId 时定位
+  mentionedIndex Int?
+
+  sentiment PropertyFeedbackSentiment @default(UNKNOWN)
+  /// 兴趣等级 0～5，5 表示非常喜欢
+  interestLevel Int?
+  /// 客户原话
+  rawQuote String? @db.Text
+  /// 反馈原因摘要
+  reasons String[] @default([])
+
+  /// 各维度的具体反应
+  reactions Json @default("[]")
+
+  /// 价格反应说明（如"觉得贵了"）
+  priceReaction String?
+  locationReaction String?
+  layoutReaction String?
+  communityReaction String?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([propertyId])
+  @@index([sourceMessageId])
+  @@map("customer_property_feedback")
+}
+
+/// 推荐批次。记录"某次给某客户推荐了哪些房源"。
+model RecommendationBatch {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agentId        String
+
+  /// 触发本次推荐的消息
+  sourceMessageId String?
+  /// 使用的需求快照版本
+  requirementSnapshotId String?
+
+  /// 贝壳检索到的候选数量
+  candidateCount Int @default(0)
+  /// 通过硬筛的数量
+  hardFilteredCount Int @default(0)
+  /// 最终推荐的房源 ID 列表（按推荐顺序）
+  recommendedPropertyIds String[] @default([])
+  /// 每套房的评分明细（JSON）
+  scoreBreakdowns Json @default("[]")
+
+  status RecommendationStatus @default(GENERATED)
+
+  /// 使用的搜索条件（JSON，便于复现）
+  searchQuery Json?
+  /// 贝壳原始召回数
+  beikeTotalRecalled Int?
+  /// 全流程耗时
+  durationMs Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// 生成该批次的回复
+  replies GeneratedCustomerReply[]
+
+  @@index([organizationId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([status])
+  @@map("recommendation_batches")
+}
+
+/// 生成的微信回复文案。
+///
+/// 注意状态语义：
+///   copiedAt        —— 经纪人点了"复制"，**不代表客户已收到**
+///   sentConfirmedAt —— 经纪人人工确认"我已发送"
+/// 系统绝不能自动把状态推进到"已发送"。
+model GeneratedCustomerReply {
+  id             String @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  agentId        String
+
+  recommendationBatchId String?
+  recommendationBatch   RecommendationBatch? @relation(fields: [recommendationBatchId], references: [id], onDelete: SetNull)
+
+  /// 回复正文（可直接粘贴到普通微信）
+  content String @db.Text
+  /// 文案风格
+  style ReplyStyle @default(NATURAL_PROFESSIONAL)
+  /// 该文案提到的房源 ID
+  propertyIds String[] @default([])
+
+  /// 复制时间（人工操作）
+  copiedAt DateTime?
+  /// 人工确认发送时间
+  sentConfirmedAt DateTime?
+  /// 是否由 AI 生成（false 表示规则模板降级）
+  aiGenerated Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([recommendationBatchId])
+  @@map("generated_customer_replies")
+}

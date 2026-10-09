@@ -1,0 +1,44 @@
+# EstatePilot AI - pnpm workspace + pnpm 12 configuration
+#
+# pnpm 12 stores its settings HERE, not in .npmrc (see DEVELOPMENT_ENVIRONMENT.md 15.1).
+# This file must stay UTF-8 WITHOUT a BOM, or pnpm aborts with
+# "a BOM must not appear inside a document".
+
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# This machine reaches the internet through a local VPN proxy (see 15.4).
+# pnpm requires camelCase keys here - "https-proxy" is silently IGNORED.
+# Remove these two lines when working on an unproxied network.
+proxy: http://127.0.0.1:17891
+httpsProxy: http://127.0.0.1:17891
+
+# Keep the content-addressable store INSIDE the project.
+# Why: pnpm derives its store operation lock directory from the store's parent
+# ("<store-parent>/pnpm-store-operation-locks"), and the DSH file sandbox denies writes
+# outside the workspace. With the store here, `pnpm install` needs no elevation.
+# Override with --config.store-dir=<path> if you prefer the shared D:\.pnpm-store.
+storeDir: .pnpm-store
+# NOTE: pnpm's store operation lock lives under its "state dir", which defaults to
+# %LOCALAPPDATA%. That path is outside the DSH workspace sandbox, so `pnpm install`
+# needs elevation. The permanent machine-level fix is:
+#   pnpm config set --global state-dir <path inside a writable location>
+# pnpm refuses to accept "stateDir" here (it must be a machine setting).
+
+# pnpm 12 denies all dependency lifecycle scripts by default (supply-chain hardening).
+# These packages genuinely need their postinstall to produce native binaries.
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  prisma: true
+  esbuild: true
+  sharp: true
+  '@tailwindcss/oxide': true
+  argon2: true
+  bcrypt: true
+  unrs-resolver: true
+  # BullMQ 的可选原生加速模块（无原生实现时 msgpackr 有纯 JS 回退，但仍需放行构建）
+  msgpackr-extract: true
+minimumReleaseAgeExclude:
+  - lucide-react@1.53.0

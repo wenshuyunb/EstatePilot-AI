@@ -1,0 +1,26 @@
+{
+  "name": "@estatepilot/types",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EstatePilot AI - 跨端共享领域类型与枚举（单一事实来源）",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"@estatepilot/types: no lint target\"",
+    "test": "echo \"@estatepilot/types: no test target\""
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

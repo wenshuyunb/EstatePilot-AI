@@ -1,0 +1,51 @@
+{
+  "name": "estatepilot-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EstatePilot AI - 房产 AI 成交助手 | Real-estate AI deal-closing copilot for brokerages",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@12.10.1",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "setup": "pnpm install && pnpm db:generate",
+    "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
+    "dev:api": "pnpm --filter @estatepilot/api dev",
+    "dev:web": "pnpm --filter @estatepilot/web dev",
+    "build": "pnpm --filter @estatepilot/types build && pnpm --filter @estatepilot/utils build && pnpm --filter @estatepilot/database build && pnpm --filter @estatepilot/ai build && pnpm --filter @estatepilot/api build && pnpm --filter @estatepilot/web build",
+    "build:api": "pnpm --filter @estatepilot/api build",
+    "build:web": "pnpm --filter @estatepilot/web build",
+    "start": "pnpm -r --parallel --filter \"./apps/*\" start",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,mjs,json,md,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,json,md,yaml,yml}\"",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm --filter @estatepilot/api test",
+    "test:e2e": "pnpm --filter @estatepilot/api test:e2e",
+    "test:web": "pnpm --filter @estatepilot/web test",
+    "test:all": "pnpm typecheck && pnpm lint && pnpm test",
+    "db:generate": "pnpm --filter @estatepilot/database generate",
+    "db:migrate": "pnpm --filter @estatepilot/database migrate",
+    "db:deploy": "pnpm --filter @estatepilot/database migrate:deploy",
+    "db:seed": "pnpm --filter @estatepilot/database seed",
+    "db:reset": "pnpm --filter @estatepilot/database reset",
+    "db:studio": "pnpm --filter @estatepilot/database studio",
+    "infra:up": "docker compose -f infrastructure/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infrastructure/docker-compose.yml down",
+    "infra:logs": "docker compose -f infrastructure/docker-compose.yml logs -f",
+    "infra:ps": "docker compose -f infrastructure/docker-compose.yml ps",
+    "stack:up": "docker compose -f infrastructure/docker-compose.full.yml up -d --build",
+    "stack:down": "docker compose -f infrastructure/docker-compose.full.yml down",
+    "e2e": "playwright test",
+    "e2e:ui": "playwright test --ui",
+    "e2e:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3"
+  }
+}

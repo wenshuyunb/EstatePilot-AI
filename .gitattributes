@@ -1,0 +1,64 @@
+# ============================================================================
+# 行尾与文本规范化
+#
+# 为什么需要这个文件：
+#   本项目的开发环境是 Windows，而部署环境通常是 Linux。
+#   若不统一，同一个文件在两端的行尾会不同（CRLF vs LF），
+#   后果包括：
+#     · git diff 显示整文件变更（实际只改了一行）
+#     · Shell 脚本在 Linux 上因 CRLF 报 `bad interpreter`
+#     · Dockerfile 指令解析失败
+#
+# 策略：**仓库内一律 LF**，检出到工作区时由 Git 自动处理。
+# ============================================================================
+
+# 默认：自动识别文本文件并规范化为 LF
+* text=auto eol=lf
+
+# ---- 明确为文本的文件（强制 LF）----
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sql   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+
+# ---- 明确为二进制的文件（不做任何转换）----
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.exe   binary
+*.dll   binary
+*.node  binary
+
+# ---- 特殊文件 ----
+# Shell 脚本必须 LF，否则 Linux 下无法执行
+*.sh    text eol=lf
+
+# Windows 批处理必须 CRLF，否则 cmd.exe 可能解析异常
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# PowerShell 脚本：LF 可用，但 CRLF 兼容性更好
+*.ps1   text eol=crlf
+
+# ---- 不希望出现在 diff / 统计中的生成物 ----
+pnpm-lock.yaml  -diff linguist-generated
+*.tsbuildinfo   -diff linguist-generated

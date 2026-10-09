@@ -1,0 +1,50 @@
+{
+  "name": "@estatepilot/database",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EstatePilot AI - Prisma schema、迁移与种子数据",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "generate": "prisma generate",
+    "validate": "prisma validate",
+    "migrate": "tsx src/scripts/migrate.ts",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:status": "prisma migrate status",
+    "reset": "tsx src/scripts/reset.ts",
+    "seed": "tsx prisma/seed.ts",
+    "diagnose": "tsx src/scripts/diagnose.ts",
+    "recalc-intent": "tsx src/scripts/recalculate-intent-scores.ts",
+    "smoke-test": "tsx src/scripts/smoke-test.ts",
+    "studio": "prisma studio",
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"@estatepilot/database: no lint target\"",
+    "test": "echo \"@estatepilot/database: no test target\""
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@estatepilot/types": "workspace:*",
+    "@estatepilot/utils": "workspace:*",
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "dotenv": "17.4.2",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "@types/pg": "8.23.1",
+    "prisma": "7.10.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

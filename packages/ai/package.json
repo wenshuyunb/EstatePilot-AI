@@ -1,0 +1,33 @@
+{
+  "name": "@estatepilot/ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EstatePilot AI - 模型 Provider 适配器、Prompt 注册表与结构化输出",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo \"@estatepilot/ai: no lint target\"",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@estatepilot/types": "workspace:*",
+    "@estatepilot/utils": "workspace:*",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

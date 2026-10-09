@@ -1,0 +1,95 @@
+# ============================================================================
+# EstatePilot AI - 基础设施（开发/生产通用）
+#
+#   docker compose -f infrastructure/docker-compose.yml up -d
+#
+# 启动 PostgreSQL 18 + pgvector 与 Redis 8。
+# 应用进程（NestJS / Next.js）在宿主机运行，连接 localhost 上的这两个服务。
+#
+# 本机已知陷阱（见 DEVELOPMENT_ENVIRONMENT.md 与 DEVELOPMENT_PLAN.md）：
+#   E8  PostgreSQL 18 镜像的数据目录改为 /var/lib/postgresql（不能挂 .../data）
+# ============================================================================
+
+name: estatepilot-infra
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: estatepilot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-estatepilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-estatepilot_dev_pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-estatepilot}
+      # 中文排序与 UTF-8
+      POSTGRES_INITDB_ARGS: '--encoding=UTF-8 --locale=C'
+      TZ: Asia/Shanghai
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      # PG 18+：挂载父目录，不要挂 /var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
+      # 首次初始化时执行（仅当数据卷为空）
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-estatepilot} -d ${POSTGRES_DB:-estatepilot}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - estatepilot
+    # 开发环境下的合理上限，避免占满本机 8GB 内存
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - log_min_duration_statement=1000
+
+  redis:
+    image: redis:8-alpine
+    container_name: estatepilot-redis
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redisdata:/data
+    command:
+      - redis-server
+      # BullMQ 需要持久化：开启 AOF，保证任务不因重启丢失
+      - --appendonly
+      - 'yes'
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - estatepilot
+
+volumes:
+  pgdata:
+    name: estatepilot-pgdata
+  redisdata:
+    name: estatepilot-redisdata
+
+networks:
+  estatepilot:
+    name: estatepilot-network
+    driver: bridge
