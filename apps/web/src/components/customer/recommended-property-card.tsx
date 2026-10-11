@@ -18,8 +18,9 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
-  ExternalLink,
+  Copy,
   ImageIcon,
+  Loader2,
   MapPin,
   TrendingDown,
   TrendingUp,
@@ -28,6 +29,12 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { PropertyDetailPanel } from '@/components/customer/property-detail-panel';
 import { cn } from '@/lib/utils';
+import {
+  formatPropertyForCopy,
+  describeCopyOutput,
+  normalizeNumber,
+} from '@/lib/property-copy';
+import { usePropertyDetail } from '@/lib/queries/use-property-detail';
 import {
   describeDecoration,
   describeOrientation,
@@ -97,11 +104,136 @@ export function RecommendedPropertyCard({
 }: RecommendedPropertyCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
 
+  /**
+   * 复制状态。
+   *
+   * `idle` → `copied` 展示"已复制"，2 秒后回到 `idle`。
+   * 用状态机而不是布尔值，是为了将来能加 `failed` 分支。
+   */
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [copying, setCopying] = useState(false);
+  const [copyHint, setCopyHint] = useState<string | null>(null);
+
+  /**
+   * 复制时按需获取详情。
+   *
+   * ============================================================================
+   * 为什么要在这里也取一次（而不是只用列表带回的 fullDetail）
+   * ============================================================================
+   * 实测：132 套房源里只有 3 套（2%）在列表里带 `fullDetail`，
+   * 因为完整详情只在"点开卡片"时才落库。
+   * 结果经纪人直接点复制时拿到的是**极简摘要**。
+   *
+   * 现在后端这个接口**不依赖贝壳**（本地 Property 行即可构造），
+   * 因此这里取一次是安全的：不消耗配额、限流时也能返回。
+   *
+   * `enabled: false` + 手动 `refetch()`：只在点复制时发请求，
+   * 不打扰正常浏览。
+   */
+  const detailQuery = usePropertyDetail(customerId, property.externalId, property.city, false);
+
   const circledNumbers = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧'];
   const number = circledNumbers[index] ?? `${index + 1}.`;
 
   const decoration = describeDecoration(property.decoration);
   const orientation = describeOrientation(property.orientation);
+
+  /**
+   * 复制完整房源信息到剪贴板。
+   *
+   * 设计要点：
+   *   · 有完整详情 → 输出含小区信息与周边配套的完整文本
+   *   · 无完整详情 → 降级用列表摘要，并**如实提示**"未含完整详情"
+   *   · 复制失败（浏览器权限/非 HTTPS）→ 明确告知，而不是静默失败
+   */
+  const handleCopy = async (): Promise<void> => {
+    setCopying(true);
+    setCopyHint(null);
+
+    try {
+      /**
+       * 先取详情（后端已改为**不依赖贝壳**：本地 Property 行即可构造）。
+       *
+       * 取不到也不阻塞 —— 退化为用列表摘要复制。
+       */
+      let detail = property.fullDetail ?? null;
+
+      if (!detail) {
+        try {
+          const result = await detailQuery.refetch();
+
+          if (result.data?.detail) {
+            detail = result.data.detail;
+          }
+        } catch {
+          // 详情取不到就复制摘要，不中断用户操作
+        }
+      }
+
+      const text = formatPropertyForCopy({
+        community: property.community,
+        city: property.city,
+        district: property.district,
+        subDistrict: property.subDistrict,
+        title: property.title,
+        totalPrice: property.totalPrice,
+        unitPrice: property.unitPrice,
+        bedrooms: property.bedrooms,
+        livingRooms: property.livingRooms,
+        bathrooms: property.bathrooms,
+        area: property.area,
+        floor: property.floor,
+        totalFloors: property.totalFloors,
+        buildYear: property.buildYear,
+        decoration,
+        orientation,
+        subwayDistance: property.subwayDistance,
+        schoolText: property.schoolText,
+        tags: property.tags,
+        listingStatus: property.listingStatus,
+        fullDetail: detail,
+      });
+
+      await navigator.clipboard.writeText(text);
+
+      setCopyState('copied');
+      setCopyHint(describeCopyOutput(detail, text));
+
+      // 2 秒后复位，避免按钮一直停在"已复制"
+      setTimeout(() => {
+        setCopyState('idle');
+        setCopyHint(null);
+      }, 2000);
+    } catch (error) {
+      /**
+       * ⚠️ 必须把真实错误打出来。
+       *
+       * 踩过的坑：原实现把所有非 NotAllowedError 都归为"复制失败，请手动选中文本"，
+       * 结果线上排查时**完全看不到真实原因** —— 实际错误可能发生在
+       * `formatPropertyForCopy` 里（与剪贴板毫无关系），
+       * 但提示却把方向引向"剪贴板权限"。
+       */
+      console.error('[复制房源信息] 失败：', error);
+
+      const isClipboardError = error instanceof DOMException;
+
+      setCopyState('failed');
+      setCopyHint(
+        !navigator.clipboard
+          ? '当前浏览器不支持剪贴板写入，请手动选中文本'
+          : isClipboardError && error.name === 'NotAllowedError'
+            ? '浏览器拒绝了剪贴板权限，请允许后重试'
+            : `复制失败（${error instanceof Error ? error.message : String(error)}）`,
+      );
+
+      setTimeout(() => {
+        setCopyState('idle');
+        setCopyHint(null);
+      }, 3000);
+    } finally {
+      setCopying(false);
+    }
+  };
 
   /** 匹配度颜色：90+ 极佳，75+ 良好，60+ 一般 */
   const scoreTone =
@@ -211,9 +343,9 @@ export function RecommendedPropertyCard({
               <span className="tabular text-base font-semibold text-ink">
                 {formatWan(property.totalPrice)}
               </span>
-              {property.unitPrice > 0 && (
+              {normalizeNumber(property.unitPrice) > 0 && (
                 <span className="tabular text-xs text-ink-muted">
-                  {Math.round(property.unitPrice / 1000)}千/㎡
+                  {Math.round(normalizeNumber(property.unitPrice) / 1000)}千/㎡
                 </span>
               )}
               <span className="text-xs text-ink-secondary">
@@ -424,16 +556,52 @@ export function RecommendedPropertyCard({
                 )}
               </div>
 
-              <div className="flex items-center gap-1">
-                <a
-                  href={`https://sh.ke.com/ershoufang/${property.externalId}.html`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-0.5 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-ink-secondary transition-colors hover:bg-surface-hover"
+              {/* 复制结果反馈：明确告诉经纪人复制了什么（含/不含完整详情） */}
+              {copyHint && (
+                <p
+                  className={cn(
+                    'text-[10px]',
+                    copyState === 'failed' ? 'text-danger' : 'text-success',
+                  )}
                 >
-                  <ExternalLink className="size-3" />
-                  详情
-                </a>
+                  {copyState === 'failed' ? copyHint : `已复制：${copyHint}`}
+                </p>
+              )}
+
+              <div className="flex items-center gap-1">
+                {/**
+                 * 复制房源详细信息。
+                 *
+                 * 产品要求：经纪人在**本平台内**拿到完整房源信息，
+                 * 直接粘到微信发给客户，**不需要跳转贝壳**。
+                 *
+                 * 原先这里是一个跳转 `https://sh.ke.com/...` 的"详情"链接，
+                 * 有两个问题：
+                 *   1. 域名**硬编码成上海**（sh），厦门房源点开必然 404
+                 *   2. 与"不跳转贝壳"的产品要求相悖
+                 */}
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  disabled={copying}
+                  className={cn(
+                    'inline-flex items-center gap-0.5 rounded-md border px-1.5 py-0.5 text-[11px] transition-colors',
+                    copyState === 'copied'
+                      ? 'border-success/40 bg-success/10 text-success'
+                      : 'border-border text-ink-secondary hover:bg-surface-hover',
+                    copying && 'opacity-60',
+                  )}
+                  title="复制这套房源的完整信息（含小区与周边配套）"
+                >
+                  {copying ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : copyState === 'copied' ? (
+                    <Check className="size-3" />
+                  ) : (
+                    <Copy className="size-3" />
+                  )}
+                  {copying ? '复制中' : copyState === 'copied' ? '已复制' : '复制信息'}
+                </button>
 
                 {showControls && (
                   <>

@@ -392,9 +392,24 @@ export class PropertySearchQueryBuilder {
       segments.push(input.districts.join(' '));
     }
 
-    // 户型（硬条件）
+    /**
+     * 户型（硬条件）。
+     *
+     * ⚠️ 必须输出**全部**户型，不能只取第一个（踩过的真实 bug）。
+     *
+     * 原实现 `segments.push(\`${input.bedrooms[0]}居室\`)` 只取首个 ——
+     * 当客户说「三房最好，两房也可以」（bedrooms = [2, 3]）时，
+     * 查询变成「2居室」，**3 房的房源全部被漏掉**，
+     * 而客户的真实意图恰恰是"这两个户型都可以看"。
+     *
+     * 这与上面 districts 的处理原则一致：
+     * 客户给了多个可接受值就应全部带上，而不是自作主张只用一个。
+     *
+     * 贝壳对「2居室 3居室」这种并列能正确理解为"任一即可"
+     * （与「湖里区 集美区」的并列语义相同）。
+     */
     if (input.bedrooms.length > 0) {
-      segments.push(`${input.bedrooms[0]}居室`);
+      segments.push(input.bedrooms.map((bedroom) => `${bedroom}居室`).join(' '));
     }
 
     // 预算（硬条件）

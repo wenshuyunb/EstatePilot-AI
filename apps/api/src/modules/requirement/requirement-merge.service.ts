@@ -324,7 +324,29 @@ export class RequirementMergeService {
     // =====================================================================
     if (canTouch('bedrooms') && extracted.bedrooms.preferred !== null) {
       const newBedrooms = extracted.bedrooms.preferred;
-      const override = isOverride('bedrooms') || extracted.bedrooms.strict;
+
+      /**
+       * 合并语义（真实 bug 修复，详见 ExtractedBedrooms.additive 的注释）。
+       *
+       * 踩过的坑：客户说「厦门湖里区三房」，最终 bedrooms 变成 [2, 3] ——
+       * 旧逻辑把"三房"当成"在原有基础上追加"，检索式变成"2居室"，
+       * 搜出 2 房房源，答非所问。
+       *
+       * 现在的判定：
+       *   · 客户明确说了具体户型（"三房"）    → **替换**
+       *   · 客户在放宽范围（"两房也可以"）    → 追加
+       *   · 客户明确改口（"现在只考虑三房"）  → 替换
+       *   · 客户硬性要求（"必须三房"）        → 替换
+       *
+       * ⚠️ 默认是**替换**（必须 additive 显式为 true 才追加）——
+       *    因为"客户说出了想要的户型"是常态，而"放宽"需要额外的让步语气词。
+       *    旧逻辑恰好相反（默认追加），这正是 bug 的根源。
+       *
+       * ⚠️ 用 `=== true` 而不是直接取值：历史快照里可能没有这个字段，
+       *    undefined 必须按"非放宽"处理，否则老数据会走错分支。
+       */
+      const additive = extracted.bedrooms.additive === true && !extracted.bedrooms.strict;
+      const override = isOverride('bedrooms') || extracted.bedrooms.strict || !additive;
 
       if (merged.bedrooms.length === 0) {
         merged.bedrooms = [newBedrooms];
@@ -336,7 +358,7 @@ export class RequirementMergeService {
           `${newBedrooms} 房`,
         );
       } else if (override) {
-        // 客户明确改口（"现在只考虑三房"）→ 替换
+        // 替换：客户指定了具体户型，或明确改口 / 硬性要求
         const previous = [...merged.bedrooms];
         merged.bedrooms = [newBedrooms];
         if (previous.join(',') !== String(newBedrooms)) {
@@ -349,7 +371,7 @@ export class RequirementMergeService {
           );
         }
       } else if (!merged.bedrooms.includes(newBedrooms)) {
-        // 未改口 → 追加为可接受范围（"三房最好，两房也可以"）
+        // 追加：客户在放宽范围（"三房最好，两房也可以"）
         const previous = [...merged.bedrooms];
         merged.bedrooms = [...merged.bedrooms, newBedrooms].sort((a, b) => a - b);
         recordChange(

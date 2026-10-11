@@ -27,6 +27,7 @@ import { RecommendationService } from './recommendation.service.js';
 import { PropertyFeedbackService } from './property-feedback.service.js';
 import { RequirementProfileService } from './requirement-profile.service.js';
 import { WeChatReplyGenerator } from './wechat-reply-generator.service.js';
+import { mapPropertyRowToNormalized } from '../property/property-row.mapper.js';
 
 /** 记录客户反馈的请求 */
 const feedbackSchema = z.object({
@@ -252,12 +253,24 @@ export class RecommendationController {
       .map((id) => properties.find((property) => property['id'] === id))
       .filter((property): property is Record<string, unknown> => property !== undefined);
 
+    /**
+     * ⚠️ 必须经 `mapPropertyRowToNormalized` 映射，**不能直接 as never 传下去**
+     *    （线上 500 事故的成因，详见 property-row.mapper.ts 的说明）。
+     *
+     * 数据库读回的 `totalPrice` 是 **BigInt**、`area` 是 **Decimal**，
+     * 而文案生成器内部做 `Math.abs()`/`Math.round()` 数值运算 ——
+     * BigInt 会让它直接抛 `TypeError: Cannot convert a BigInt value to a number`，
+     * 表现为"切换文案模板时报生成失败"。
+     *
+     * 之前的实现写成 `property: property as never`，
+     * 用类型断言把编译器的检查关掉了，于是问题被推迟到运行时才暴露。
+     */
     const reply = await this.replyGenerator.generate({
       customerName: '客户',
       agentName: '',
       profile,
       properties: ordered.map((property) => ({
-        property: property as never,
+        property: mapPropertyRowToNormalized(property),
         matchScore: 0,
         highlights: [],
         cautions: [],

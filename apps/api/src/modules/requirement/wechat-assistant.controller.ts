@@ -23,6 +23,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { z } from 'zod';
+import { mapPropertyRowToNormalized } from '../property/property-row.mapper.js';
 import {
   ApiErrorCode,
   MessageImportSource,
@@ -295,8 +296,9 @@ export class WeChatAssistantController {
     /**
      * 城市：优先用查询参数，否则回退到客户画像里的城市。
      *
-     * 为什么不能省：贝壳的 `entity_detail` 必须传 city_name，
-     * 缺了会返回参数校验错误（且该错误曾误触发熔断）。
+     * ⚠️ 现在**不再因为缺城市而直接失败** —— 因为本地 Property 行
+     * 本身就带 city，本地构造完全不依赖这个参数。
+     * 只有真要调贝壳时才需要它（服务内部会判断）。
      */
     let resolvedCity = city?.trim() ?? '';
 
@@ -305,17 +307,14 @@ export class WeChatAssistantController {
       resolvedCity = profile.city ?? '';
     }
 
-    if (resolvedCity.length === 0) {
-      return {
-        detail: null,
-        images: [],
-        vrUrl: null,
-        from: 'NONE',
-        fetchedAt: null,
-        note: null,
-        message: '缺少城市信息，无法获取房源详情。请确认客户需求里包含城市。',
-      };
-    }
+    /**
+     * 是否允许调用贝壳。
+     *
+     * 预算护栏决定 —— 打满时这里就是 false，详情服务会直接用
+     * 本地 Property 字段构造，**不消耗配额也不报错**。
+     */
+    const quota = this.beikeClient.getQuotaGuard().check();
+    const allowLiveFetch = quota.allowed && resolvedCity.length > 0;
 
     const loaded = await this.propertyDetail.load(
       externalId,
@@ -324,6 +323,20 @@ export class WeChatAssistantController {
       async (id, detail) => {
         await this.detailStore.persistOne(user.organizationId, id, detail);
       },
+      /**
+       * 本地 Property 行加载器 —— **这是"贝壳限流也能用"的关键**。
+       *
+       * 数据库里 100% 的房源都有这行（搜索时就落库），
+       * 含小区/价格/面积/户型/朝向/年份/装修/标签/描述等 15+ 项字段。
+       */
+      async (id) => {
+        const scope = this.tenant.scopeFor(user.organizationId);
+        const row = await scope.findFirst<Record<string, unknown>>('Property', {
+          where: { externalId: id },
+        });
+        return row ?? null;
+      },
+      allowLiveFetch,
     );
 
     if (!loaded) {
@@ -335,7 +348,7 @@ export class WeChatAssistantController {
         fetchedAt: null,
         note: null,
         message:
-          '暂时无法获取这套房源的完整详情（贝壳可能繁忙或限流）。' +
+          '本地没有这套房源的记录，且当前无法查询贝壳。' +
           '可以稍后重试；列表里的摘要信息仍然可用。',
       };
     }
@@ -343,6 +356,8 @@ export class WeChatAssistantController {
     const messageBySource: Record<string, string> = {
       MEMORY_CACHE: '详情来自本次会话缓存',
       DATABASE: '详情来自之前获取并保存的数据',
+      LOCAL_PROPERTY:
+        '详情来自本地已保存的房源数据（无需查询贝壳，价格与在售状态请以实际为准）',
       BEIKE_LIVE: '详情已从贝壳实时获取',
     };
 
@@ -716,13 +731,23 @@ export class WeChatAssistantController {
         throw new NotFoundError('推荐房源');
       }
 
-      // 这里只做文案生成，因此用一个简化的映射（完整字段已在编排器里处理过）
+      /**
+       * ⚠️ 必须经 `mapPropertyRowToNormalized` 映射（与 recommendation.controller
+       *    的 regenerate 是同一问题）。
+       *
+       * 数据库读回的 `totalPrice` 是 **BigInt**、`area` 是 **Decimal**，
+       * 文案生成器内部会做 `Math.abs()` 数值运算 —— BigInt 直接抛
+       * `TypeError: Cannot convert a BigInt value to a number`，
+       * 表现为"生成文案失败"。
+       *
+       * 原实现 `property as never` 用类型断言关掉了编译检查，问题被推迟到运行时。
+       */
       const reply = await this.replyGenerator.generate({
         customerName: '客户',
         agentName: '',
         profile,
         properties: properties.slice(0, body.recommendationCount).map((property) => ({
-          property: property as never,
+          property: mapPropertyRowToNormalized(property),
           matchScore: Number(property['matchScore'] ?? 0),
           highlights: [],
           cautions: [],

@@ -37,18 +37,33 @@ export interface RecommendedProperty {
   district: string;
   subDistrict: string | null;
   title: string;
-  totalPrice: number;
-  unitPrice: number;
+  /**
+   * ⚠️ 数值字段声明为 `number | string`，而不是 `number`。
+   *
+   * ============================================================================
+   * 为什么（线上"复制失败"事故）
+   * ============================================================================
+   * 后端的 `Decimal` / `BigInt` 经 JSON 序列化后是**字符串**
+   * （`totalPrice` 源自 BigInt 列，`area` 源自 Decimal 列），
+   * 但前端原先声明为 `number` —— 类型声明与运行时不符。
+   *
+   * 后果：`area.toFixed is not a function` → 复制功能报"复制失败"。
+   *
+   * 声明成联合类型能让 TypeScript **强制**调用方先归一化数值，
+   * 把这类 bug 挡在编译期而不是运行时。
+   */
+  totalPrice: number | string;
+  unitPrice: number | string;
   bedrooms: number;
   livingRooms: number;
   bathrooms: number;
-  area: number;
+  area: number | string;
   floor: number | null;
   totalFloors: number | null;
   buildYear: number | null;
   decoration: string | null;
   orientation: string | null;
-  subwayDistance: number | null;
+  subwayDistance: number | string | null;
   subwayText: string | null;
   schoolText: string | null;
   images: string[];
@@ -132,6 +147,13 @@ export interface PropertyFullDetail {
     elevatorHouseholdRatio: string | null;
     buildingType: string | null;
     usage: string | null;
+    /**
+     * 装修：精装 / 简装 / 毛坯。
+     *
+     * 后端可能从 `description` 反解得到（因为贝壳搜索结果不返回"装修类型"，
+     * 数据库该列实测覆盖率为 0%）。
+     */
+    decoration: string | null;
     downPayment: string | null;
     ownership: string | null;
     beikeScore: number | null;
@@ -542,9 +564,29 @@ export function useRegenerateReply(customerId: string) {
 // ---------------------------------------------------------------------------
 
 /** 万元格式化 */
-export function formatWan(amount: number | null | undefined): string {
+/**
+ * 金额 → "X万"。
+ *
+ * ⚠️ 参数类型是 `number | string`，因为后端的 `BigInt`/`Decimal`
+ *    经 JSON 序列化后是**字符串**。直接做 `/ 10_000` 会得到 NaN，
+ *    `.toFixed` 则会抛 `is not a function`（踩过真实的"复制失败"事故）。
+ */
+export function formatWan(amount: number | string | null | undefined): string {
   if (amount === null || amount === undefined) return '—';
-  const wan = amount / 10_000;
+
+  /**
+   * 归一化。
+   *
+   * 这里不复用 `property-copy` 的 `normalizeNumber`：
+   * 那一层是"展示格式化"的领域模块，而本文件是数据查询层，
+   * 让查询层依赖展示层会造成循环依赖。归一化逻辑很短，重复一份可接受 ——
+   * 但**必须是同一个语义**（见 property-copy.ts 的说明）。
+   */
+  const numeric = typeof amount === 'number' ? amount : Number(String(amount).trim());
+
+  if (!Number.isFinite(numeric)) return '—';
+
+  const wan = numeric / 10_000;
   return Number.isInteger(wan) ? `${wan}万` : `${wan.toFixed(1)}万`;
 }
 

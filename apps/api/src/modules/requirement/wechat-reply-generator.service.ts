@@ -486,8 +486,33 @@ export class WeChatReplyGenerator {
     return map[orientation] ?? '';
   }
 
-  private formatWan(amount: number): string {
-    const wan = Math.abs(amount) / 10_000;
+  /**
+   * 把金额格式化为"X万"。
+   *
+   * ============================================================================
+   * ⚠️ 必须容忍 BigInt / Decimal / string（踩过的真实 500 错误）
+   * ============================================================================
+   * 事故：切换文案模板（调 regenerate 接口）时报
+   *   `TypeError: Cannot convert a BigInt value to a number`
+   *   at WeChatReplyGenerator.formatWan
+   *
+   * 根因：**同一个字段在不同路径下类型不同**
+   *   · 首次生成 → 走内存里的 NormalizedProperty，totalPrice 是 number ✅
+   *   · 重新生成 → 从数据库读回来，Prisma 的 Decimal 会以 **BigInt** 形态暴露 ⚠️
+   *
+   * `Math.abs()` 对 BigInt 会直接抛异常，于是整个文案生成失败、接口 500。
+   *
+   * 修法：先用 `Number()` 归一化再运算。
+   * 用 `Number()` 而不是 `BigInt()` 是因为金额在"万"这个量级上
+   * 远小于 2^53，精度完全够用；而且后续还要做除法与 toFixed。
+   */
+  private formatWan(amount: number | bigint | string): string {
+    const numeric = Number(amount);
+
+    // 兜底：脏数据不应让整条文案生成失败
+    if (!Number.isFinite(numeric)) return '价格待确认';
+
+    const wan = Math.abs(numeric) / 10_000;
     return Number.isInteger(wan) ? `${wan}万` : `${wan.toFixed(1)}万`;
   }
 

@@ -286,23 +286,102 @@ export function extractBudget(text: string): ExtractedBudget {
 }
 
 /** 抽取卧室数要求 */
-export function extractBedrooms(text: string): { preferred: number | null; strict: boolean } {
-  // 覆盖的表达：
-  //   "三房" "三室" "3居" "3居室" "三个房间" "三房两厅"
-  //   **"两房"** —— "两" 是最常用的口语数量词，早期实现的字符类
-  //   [一二三四五六七八九十\d] 漏掉了它，导致"想看两房"完全解析不出户型。
-  const pattern = /([一两二三四五六七八九十\d]{1,2})\s*(?:房|室|居室|居|个房间|间房)/;
-  const match = pattern.exec(text);
+export function extractBedrooms(text: string): {
+  preferred: number | null;
+  strict: boolean;
+  additive: boolean;
+} {
+  /**
+   * 找出**所有**户型提及及其位置。
+   *
+   * 为什么需要位置：一句话里可能提到多个户型，且让步语气词只管**邻近**的那个。
+   * 例如「三房最好，两房也可以」——"也可以"修饰的是 2 房，不是 3 房。
+   * 旧实现只取第一个匹配（3），导致放宽语义被安到错误的数字上。
+   */
+  const pattern = /([一两二三四五六七八九十\d]{1,2})\s*(?:房|室|居室|居|个房间|间房)/g;
 
-  let preferred: number | null = null;
-  if (match?.[1]) {
-    preferred = parseCount(match[1]);
+  const mentions: Array<{ value: number; index: number; length: number }> = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const value = parseCount(match[1] ?? '');
+    if (value !== null) {
+      mentions.push({ value, index: match.index, length: match[0].length });
+    }
   }
 
   // 硬性要求："只要三房" "必须三房" "就要三房" "非三房不可" "只考虑三房"
   const strict = /(?:只要|必须要?|就要|只(?:要|考虑|看)|非[^。；;]{0,6}不可|必须是)/.test(text);
 
-  return { preferred, strict };
+  /**
+   * 判定哪个户型是"被放宽"的，优先选择它。
+   *
+   * 规则：
+   *   1. 若某个户型**紧邻**让步语气词（如"两房也可以"）→ 取它
+   *   2. 否则取**第一个**提到的户型（客户通常先说主要的）
+   */
+  const additiveMention = mentions.find((mention) => hasAdditiveModifierNear(text, mention));
+
+  let preferred: number | null = null;
+  if (additiveMention) {
+    preferred = additiveMention.value;
+  } else if (mentions.length > 0) {
+    preferred = mentions[0]!.value;
+  }
+
+  return {
+    preferred,
+    strict,
+    additive: additiveMention !== undefined && !strict,
+  };
+}
+
+/**
+ * 判断某个户型提及是否**紧邻**让步语气词。
+ *
+ * ============================================================================
+ * 为什么必须按位置判断（踩过的真实 bug）
+ * ============================================================================
+ * 最初的实现用 `additiveWords.test(sentence)` 检测整句 ——
+ * 结果「厦门湖里区三房，**400万左右**」被判成"放宽户型"，
+ * 因为句中的"左右"属于**预算**而非户型，却匹配上了语气词正则。
+ *
+ * 修正做法：只在户型词**前后一小段窗口**内找让步词，
+ * 且"左右/上下"这类模糊词必须**紧随**户型词（中间不能有"万"等单位）。
+ */
+function hasAdditiveModifierNear(
+  text: string,
+  mention: { index: number; length: number },
+): boolean {
+  /** 户型词之后 6 个字符（"两房也可以"的"也可以"在 2 字内，留余量） */
+  const after = text.slice(mention.index + mention.length, mention.index + mention.length + 6);
+
+  /** 户型词之前 4 个字符（"也可以两房"这种倒装） */
+  const before = text.slice(Math.max(0, mention.index - 4), mention.index);
+
+  // ---- 紧随其后的让步词 ----
+  if (/^\s*(?:也|都|还)?\s*(?:可以|行|能接受|接受|没问题|可考虑)/.test(after)) return true;
+  if (/^\s*(?:都可以|都行|均可)/.test(after)) return true;
+
+  /**
+   * 模糊范围："两房左右""三房上下"。
+   *
+   * ⚠️ 必须要求紧跟户型词，否则"400万左右"里的"左右"会被误判 ——
+   *    那是预算范围，不是户型范围。
+   */
+  if (/^\s*(?:左右|上下|差不多)/.test(after)) return true;
+
+  // ---- 前置的让步词（倒装："也可以考虑两房"）----
+  if (/(?:也可以|也行|都能接受|都可以)\s*$/.test(before)) return true;
+
+  // ---- 并列："两房三房都行" ----
+  // 户型词后紧跟另一个户型词，且再后面有"都行/都可以"
+  if (/^\s*[一两二三四五六七八九十\d]{1,2}\s*(?:房|室|居)/.test(after)) {
+    const further = text.slice(mention.index, mention.index + 14);
+    if (/(?:都|均)\s*(?:可以|行|能接受|接受)/.test(further)) return true;
+  }
+
+  return false;
 }
 
 /** 抽取面积范围 */

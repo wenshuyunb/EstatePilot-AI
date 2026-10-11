@@ -205,6 +205,14 @@ export class CachedPropertySearchService {
           externalId: true,
           // 必须取出真实来源，不能硬编码（见下方 toNormalized 的注释）
           externalProvider: true,
+          /**
+           * ⚠️ 必须取出 rawData —— 它保存着搜索时贝壳返回的完整字段
+           * （含周边交通/小区/学区），是"不调贝壳也能构造详情"的来源。
+           *
+           * 之前这里没取，导致 toNormalized 只能用元数据覆盖它，
+           * 而 upsert 又会写回数据库 → **原始字段被逐步抹掉**（真实数据丢失 bug）。
+           */
+          rawData: true,
           dataReliabilityScore: true,
           lastVerifiedAt: true,
           verificationStatus: true,
@@ -358,6 +366,14 @@ export class CachedPropertySearchService {
      */
     externalProvider: string;
     images: Array<{ url: string; category: string; sortOrder: number; caption: string | null }>;
+    /**
+     * 原始数据 —— 搜索时保存的贝壳完整字段。
+     *
+     * ⚠️ 必须保留并参与合并：它是"不调贝壳也能构造详情"的唯一来源。
+     *    曾经因为这里没取，导致每次读缓存都把它覆盖成元数据，
+     *    原始字段被永久抹掉（真实数据丢失 bug）。
+     */
+    rawData: unknown;
     dataReliabilityScore: number;
     lastVerifiedAt: Date | null;
     verificationStatus: string;
@@ -365,8 +381,28 @@ export class CachedPropertySearchService {
     return {
       externalProvider: row.externalProvider as PropertyProviderKind,
       externalId: row.externalId,
+      /**
+       * ⚠️ 必须**保留原有的 rawData**（踩过的真实数据丢失 bug）。
+       *
+       * ============================================================================
+       * 事故经过
+       * ============================================================================
+       * 搜索时 `rawData` 保存的是**贝壳返回的完整字段**（`fields`）——
+       * 含周边交通/小区/学区等，是"不用再调贝壳就能构造详情"的宝贵来源。
+       *
+       * 但读缓存时这里把它整个换成了"缓存元数据"（source/cachedAt/分数），
+       * 而 upsert 又会把结果写回数据库 ——
+       * 于是**每次走缓存都会抹掉一层原始字段**。
+       *
+       * 实测后果：库里 132 套房源的 rawData 全变成了 6 个元数据字段，
+       * 原始房源信息**永久丢失**，只能重新向贝壳请求。
+       *
+       * 现在改为：**合并**而非替换 —— 元数据与原始字段共存。
+       */
       rawData: {
-        source: 'LOCAL_CACHE',
+        ...((row.rawData as Record<string, unknown> | null) ?? {}),
+        // 缓存读取的元数据（放在保留的原始字段之后，同名时以元数据为准）
+        cacheSource: 'LOCAL_CACHE',
         cachedAt: (row.lastSyncedAt ?? row.updatedAt).toISOString(),
         propertyDbId: row.id,
         // 把可信度一并带出，供上层构造推荐卡片时展示

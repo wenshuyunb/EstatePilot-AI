@@ -16,9 +16,15 @@
  * ============================================================================
  * 数据诚实性原则
  * ============================================================================
- * 拿不到的字段**显示"暂无数据"，绝不编造**（需求 §13）。
- * 贝壳原始数据里也有缺失项（如"套内面积暂无"），后端已清洗为 null，
- * 这里统一走 `Field` 组件：值为空即显示占位符。
+ * 拿不到的字段**留空，绝不编造**（需求 §13）。
+ *
+ * ⚠️ 但"留空"早期被实现成了"显示暂无数据"的占位符 —— 那是错的：
+ *    实测"仅本地数据"模式下有 31 个空字段，界面被"暂无数据"淹没，
+ *    经纪人以为"什么都没有"，而实际上关键信息（价格/面积/户型/朝向/楼层/年份）都在。
+ *
+ * 现在的做法：
+ *   · 单个字段为空 → **整行不渲染**
+ *   · 整段信息缺失 → 用一句话说明（EmptyHint），而不是列十几个占位符
  */
 
 import { useState } from 'react';
@@ -233,30 +239,39 @@ export function PropertyDetailPanel({
               <SectionTitle icon={<Home className="size-3" />} title="房屋信息" />
 
               {detail.base.title && (
-                <p className="mt-1 text-xs font-medium text-ink">{detail.base.title}</p>
+                <p className="mt-1 whitespace-pre-line text-xs font-medium text-ink">
+                  {detail.base.title}
+                </p>
               )}
 
-              <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
-                <Field label="建筑面积" value={detail.base.buildingArea} />
-                <Field label="套内面积" value={detail.base.innerArea} />
-                <Field label="单价" value={detail.base.unitPrice} />
-                <Field label="房屋年限" value={detail.base.houseAge} highlight />
-                <Field label="首付" value={detail.base.downPayment} highlight />
-                <Field label="用途" value={detail.base.usage} />
-                <Field label="户型结构" value={detail.base.layoutStructure} />
-                <Field label="梯户比例" value={detail.base.elevatorHouseholdRatio} />
-                <Field label="楼型" value={detail.base.buildingType} />
-                <Field label="电梯" value={detail.base.hasElevator} />
-                <Field label="交易权属" value={detail.base.ownership} />
-                <Field
-                  label="楼层"
-                  value={
-                    detail.base.floor && detail.base.totalFloors
-                      ? `${detail.base.floor} / 共${detail.base.totalFloors}`
-                      : (detail.base.floor ?? detail.base.totalFloors)
-                  }
-                />
-              </div>
+              {/**
+               * 只渲染**有值**的字段。
+               *
+               * 用 FieldGrid 而不是手写一堆 <Field>：由组件统一过滤空值，
+               * 避免"每加一个字段就要记得判断一次"，也让"空字段不显示"成为默认行为。
+               */}
+              <FieldGrid
+                fields={[
+                  ['建筑面积', detail.base.buildingArea],
+                  ['户型', detail.base.houseType],
+                  ['总价', detail.base.totalPrice],
+                  ['单价', detail.base.unitPrice],
+                  ['朝向', detail.base.orientation],
+                  ['楼层', detail.base.floor],
+                  ['建成年份', detail.community?.buildYears ?? null],
+                  ['装修', detail.base.decoration],
+                  ['房屋年限', detail.base.houseAge],
+                  ['首付', detail.base.downPayment],
+                  ['电梯', detail.base.hasElevator],
+                  ['梯户比例', detail.base.elevatorHouseholdRatio],
+                  ['楼型', detail.base.buildingType],
+                  ['套内面积', detail.base.innerArea],
+                  ['户型结构', detail.base.layoutStructure],
+                  ['用途', detail.base.usage],
+                  ['交易权属', detail.base.ownership],
+                  ['在售状态', detail.base.listingStatus],
+                ]}
+              />
 
               {detail.base.tags.length > 0 && (
                 <div className="mt-1.5 flex flex-wrap gap-1">
@@ -267,6 +282,16 @@ export function PropertyDetailPanel({
                   ))}
                 </div>
               )}
+
+              {/**
+               * 贝壳详情的字段（房屋年限/首付/电梯/梯户比…）只在**完整详情**里有，
+               * 本地数据模式下确实拿不到 —— 用一句话说明，而不是列 10 个"暂无数据"。
+               */}
+              {!detail.base.houseAge && !detail.base.downPayment && !detail.base.hasElevator && (
+                <EmptyHint>
+                  房屋年限、首付、电梯、梯户比例等信息由贝壳详情提供，当前未获取到。
+                </EmptyHint>
+              )}
             </section>
           )}
 
@@ -275,32 +300,50 @@ export function PropertyDetailPanel({
             <section>
               <SectionTitle icon={<Building2 className="size-3" />} title="小区信息" />
 
-              <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
-                <Field label="容积率" value={detail.community.floorAreaRatio} />
-                <Field label="绿化率" value={detail.community.greeningRate} />
-                <Field label="物业费" value={detail.community.propertyFee} />
-                <Field label="物业公司" value={detail.community.propertyCompany} />
-                <Field label="车位配比" value={detail.community.parkingRatio} />
-                <Field label="车位租金" value={detail.community.parkingFee} />
-                <Field
-                  label="总户数"
-                  value={detail.community.totalHouseholds !== null ? `${detail.community.totalHouseholds} 户` : null}
-                />
-                <Field label="建成年代" value={detail.community.buildYears} />
-                <Field label="人车分流" value={detail.community.separatedTraffic} />
-                <Field label="封闭小区" value={detail.community.isClosed} />
-                <Field label="用水" value={detail.community.waterType} />
-                <Field label="用电" value={detail.community.electricityType} />
-                <Field label="租售比" value={detail.community.rentToSaleRatio} />
-                <Field label="租房均价" value={detail.community.rentPrice} />
-                <Field label="燃气费" value={detail.community.gasFee} />
-                <Field label="所属商圈" value={detail.community.businessDistrict} />
-              </div>
+              <FieldGrid
+                fields={[
+                  ['小区名称', detail.community.name],
+                  ['建成年代', detail.community.buildYears],
+                  ['容积率', detail.community.floorAreaRatio],
+                  ['绿化率', detail.community.greeningRate],
+                  ['物业费', detail.community.propertyFee],
+                  ['物业公司', detail.community.propertyCompany],
+                  ['车位配比', detail.community.parkingRatio],
+                  ['车位租金', detail.community.parkingFee],
+                  [
+                    '总户数',
+                    detail.community.totalHouseholds !== null
+                      ? `${detail.community.totalHouseholds} 户`
+                      : null,
+                  ],
+                  ['人车分流', detail.community.separatedTraffic],
+                  ['封闭小区', detail.community.isClosed],
+                  ['用水', detail.community.waterType],
+                  ['用电', detail.community.electricityType],
+                  ['租售比', detail.community.rentToSaleRatio],
+                  ['租房均价', detail.community.rentPrice],
+                  ['燃气费', detail.community.gasFee],
+                  ['所属商圈', detail.community.businessDistrict],
+                ]}
+              />
 
               {detail.community.aliases.length > 0 && (
                 <p className="mt-1 text-[10px] text-ink-muted">
                   又名：{detail.community.aliases.join('、')}
                 </p>
+              )}
+
+              {/**
+               * 小区详情（容积率/绿化率/物业费/车位/用水用电…）只在**完整详情**里。
+               *
+               * 缺失时用一句话说明，而不是列 16 个"暂无数据" ——
+               * 后者会把视觉重心全占掉（实测过）。
+               */}
+              {!detail.community.floorAreaRatio && !detail.community.propertyFee && (
+                <EmptyHint>
+                  小区详细资料（容积率、绿化率、物业费、车位等）需要贝壳详情，当前未获取到。
+                  可稍后展开重试。
+                </EmptyHint>
               )}
             </section>
           )}
@@ -347,8 +390,19 @@ function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string })
 /**
  * 单个字段。
  *
- * 值为空时显示"暂无数据" —— **绝不编造**（需求 §13）。
- * `highlight` 用于标出经纪人最常被客户问到的字段（房屋年限、首付）。
+ * ⚠️ 值为空时**返回 null（整行不渲染）**，而不是显示"暂无数据"。
+ *
+ * ============================================================================
+ * 为什么改（真实体验问题）
+ * ============================================================================
+ * 原实现给每个空字段都渲染"暂无数据"。实测在"仅本地数据"模式下：
+ *   base 段      有值 8 项 / 空 13 项
+ *   community 段 有值 3 项 / 空 18 项
+ * → 界面出现 **31 个"暂无数据"**，把已有的 11 项信息完全淹没。
+ *   经纪人的感受是"什么都没有"，而实际上关键信息都在。
+ *
+ * 原则：**没有的信息不必逐个声明"没有"** —— 那只会掩盖已有的信息。
+ * 缺失情况改为在段落级别用一句话说明（见 EmptyHint）。
  */
 function Field({
   label,
@@ -361,13 +415,49 @@ function Field({
 }) {
   const hasValue = value !== null && value !== undefined && String(value).trim().length > 0;
 
+  // 空值整行不渲染 —— 而不是显示"暂无数据"
+  if (!hasValue) return null;
+
   return (
     <div className="text-[11px] leading-relaxed">
       <span className="text-ink-muted">{label}：</span>
-      <span className={cn(hasValue ? 'text-ink' : 'text-ink-muted', highlight && hasValue && 'font-medium')}>
-        {hasValue ? String(value) : '暂无数据'}
-      </span>
+      <span className={cn('text-ink', highlight && 'font-medium')}>{String(value)}</span>
     </div>
+  );
+}
+
+/**
+ * 字段网格 —— **若所有字段都为空，整段不渲染**。
+ *
+ * 用法：把字段以 `[标签, 值]` 数组传入，组件负责过滤与判断，
+ * 调用方不需要手写一堆 `??` 与条件判断。
+ */
+function FieldGrid({ fields }: { fields: Array<[string, string | null | undefined]> }) {
+  const visible = fields.filter(
+    ([, value]) => value !== null && value !== undefined && String(value).trim().length > 0,
+  );
+
+  if (visible.length === 0) return null;
+
+  return (
+    <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+      {visible.map(([label, value]) => (
+        <Field key={label} label={label} value={value} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 数据缺失提示。
+ *
+ * 用于在整段信息缺失时**用一句话说明**，而不是列出十几个"暂无数据"。
+ */
+function EmptyHint({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="mt-1.5 rounded-md border border-dashed border-border px-2.5 py-1.5 text-[11px] text-ink-muted">
+      {children}
+    </p>
   );
 }
 

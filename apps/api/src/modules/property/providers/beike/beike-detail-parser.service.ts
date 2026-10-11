@@ -109,6 +109,16 @@ export interface PropertyFullDetail {
     buildingType: string | null;
     /** 用途：普通住宅 */
     usage: string | null;
+    /**
+     * 装修：精装 / 简装 / 毛坯。
+     *
+     * 来源有两处（取先有值的）：
+     *   1. 贝壳详情里的「装修类型」
+     *   2. 从数据库 `description` 反解 —— 因为贝壳**搜索结果**不返回装修类型，
+     *      而 description 里已经记下来了
+     *      （实测 `decoration` 列覆盖率 0%，但 description 覆盖率 100%）
+     */
+    decoration: string | null;
     /** 首付提示：首付约41.9万起 */
     downPayment: string | null;
     /** 交易权属：商品房 */
@@ -375,6 +385,13 @@ export class BeikeDetailParser {
       elevatorHouseholdRatio: str('梯户比例'),
       buildingType: str('楼型'),
       usage: str('用途'),
+      /**
+       * 装修。
+       *
+       * 贝壳详情的字段名在不同接口下不一致，因此按优先级尝试多个：
+       * 「装修类型」是详情接口的写法，「装修」是部分返回的简写。
+       */
+      decoration: str('装修类型') ?? str('装修'),
       downPayment: str('首付'),
       ownership: str('交易权属'),
       beikeScore: Number.isFinite(beikeScore) ? beikeScore : null,

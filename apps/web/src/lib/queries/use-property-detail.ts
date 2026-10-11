@@ -27,8 +27,14 @@ export interface PropertyDetailResponse {
   detail: PropertyFullDetail | null;
   images: PropertyImage[];
   vrUrl: string | null;
-  /** 数据来源：内存缓存 / 数据库 / 贝壳实时 */
-  from: 'MEMORY_CACHE' | 'DATABASE' | 'BEIKE_LIVE' | 'NONE';
+  /**
+   * 数据来源。
+   *
+   * `LOCAL_PROPERTY` 是**不依赖贝壳**的来源 —— 后端用数据库 `Property` 表
+   * 自带字段构造（覆盖率 100%）。贝壳限流时详情功能因此不会失效，
+   * 只是字段比完整详情少（没有容积率/物业费/周边配套明细）。
+   */
+  from: 'MEMORY_CACHE' | 'DATABASE' | 'LOCAL_PROPERTY' | 'BEIKE_LIVE' | 'NONE';
   fetchedAt: string | null;
   /** 新鲜度提示（如"这是 X 小时前获取的详情"） */
   note: string | null;
